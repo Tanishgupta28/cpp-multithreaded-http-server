@@ -16,6 +16,51 @@ bool close_socket(int socket_fd) {
     return true;
 }
 
+bool communicate_with_client(int client_socket) {
+    char buffer[1024];
+    ssize_t bytes_received;
+    do {
+        bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
+    } while (bytes_received == -1 && errno == EINTR);
+
+    if (bytes_received == -1) {
+        std::perror("recv");
+        return false;
+    }
+    if (bytes_received == 0) {
+        std::cout << "Client closed the connection without sending data.\n";
+        return true;
+    }
+
+    // TCP provides bytes, not complete messages or null-terminated strings.
+    std::cout << "Received " << bytes_received << " bytes: [";
+    std::cout.write(buffer, bytes_received);
+    std::cout << "]\n";
+
+    constexpr std::string_view response = "Message received.\n";
+    std::size_t bytes_sent = 0;
+    while (bytes_sent < response.size()) {
+        // Suppress SIGPIPE so a disconnected peer produces an error return.
+        const ssize_t sent = send(client_socket, response.data() + bytes_sent,
+                                  response.size() - bytes_sent, MSG_NOSIGNAL);
+        if (sent == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::perror("send");
+            return false;
+        }
+        if (sent == 0) {
+            std::cerr << "send: no progress sending response.\n";
+            return false;
+        }
+        // send() may accept fewer bytes than requested.
+        bytes_sent += static_cast<std::size_t>(sent);
+    }
+    std::cout << "Sent " << bytes_sent << " response bytes.\n";
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     int port = 8080;
     if (argc > 2) {
@@ -81,9 +126,10 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "Client connected." << std::endl;
 
+    const bool communication_succeeded = communicate_with_client(client_socket);
     const bool client_closed = close_socket(client_socket);
     const bool server_closed = close_socket(server_socket);
-    if (!client_closed || !server_closed) {
+    if (!communication_succeeded || !client_closed || !server_closed) {
         return 1;
     }
     std::cout << "Sockets closed. Server exiting.\n";
