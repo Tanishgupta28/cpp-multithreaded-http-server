@@ -1,13 +1,13 @@
 # Development roadmap
 
-Current stage: **Stage 2 complete. Stopped; awaiting authorization for Stage 3.**
+Current stage: **Stage 3 complete. Stopped; awaiting authorization for Stage 4.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
 | --- | --- | --- |
 | 1 | Project foundation and basic TCP server | Complete |
 | 2 | Accept and communicate with TCP clients | Complete |
-| 3 | Parse basic HTTP requests | Upcoming |
+| 3 | Parse basic HTTP requests | Complete |
 | 4 | Generate valid HTTP responses | Upcoming |
 | 5 | Refactor into clean C++ classes | Upcoming |
 | 6 | Handle multiple clients concurrently | Upcoming |
@@ -64,3 +64,25 @@ If synchronization fails, record it here and preserve the local history.
   a fixed acknowledgement, not an echo or an HTTP response.
 - Limits: one client, one received chunk, blocking I/O without a timeout,
   no message framing, HTTP parsing, concurrency, routing, or caching.
+
+## Stage 3 validation — 2026-09-27
+
+- Same Alpine WSL2 toolchain as previous stages.
+- `cmake -S . -B build` and `cmake --build build`: passed without warnings.
+- `ctest --test-dir build --output-on-failure -V`: 1/1 test passed, covering
+  valid paths, HTTP/1.0 and HTTP/1.1, fragmented lines, split CRLF, ignored
+  trailing headers, an exact 1,024-byte line, malformed fields/separators,
+  control and non-ASCII bytes, incomplete EOF, and overlong input. Existing
+  port, argument, restart, orderly EOF, response, and reset checks passed.
+- Manual `printf 'GET /index.html HTTP/1.1\r\n' | nc -w 2 127.0.0.1 8080`:
+  printed method `GET`, path `/index.html`, version `HTTP/1.1`; client received
+  `Message received.` and both processes exited 0.
+- Assumptions: strict CRLF, single spaces between three fields, syntactically
+  valid method tokens, slash-prefixed visible-ASCII paths, HTTP/1.0 or HTTP/1.1.
+  Method extraction does not implement method behavior. Queries stay in the path.
+- Limits: 1,024 bytes including CRLF; one client and one line; no timeout,
+  full URI validation, decoding, header/body parsing, or HTTP response generation.
+  Trailing request data is ignored, and unread data at close can cause a reset.
+  Invalid lines produce a diagnostic, no reply, and exit status 1. Empty EOF
+  retains Stage 2's successful exit. EINTR and partial-send paths remain reviewed
+  rather than fault-injected. No concurrency, routing, files, or cache added.

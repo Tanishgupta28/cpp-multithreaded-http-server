@@ -7,7 +7,9 @@ import sys
 import time
 
 
-def check_connection(executable, port, arguments, message=b"Hello, server!", reset=False):
+def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
+                     reset=False, error=None, fields=(b"GET", b"/", b"HTTP/1.1"),
+                     fragments=None):
     process = subprocess.Popen(
         [executable, *arguments], stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -28,7 +30,11 @@ def check_connection(executable, port, arguments, message=b"Hello, server!", res
                 client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
                                   struct.pack("ii", 1, 0))
             else:
-                if message:
+                if fragments:
+                    for fragment in fragments:
+                        client.sendall(fragment)
+                        time.sleep(0.03)
+                elif message:
                     client.sendall(message)
                 client.shutdown(socket.SHUT_WR)
                 response = b""
@@ -37,24 +43,27 @@ def check_connection(executable, port, arguments, message=b"Hello, server!", res
                     if not chunk:
                         break
                     response += chunk
-                expected = b"Message received.\n" if message else b""
+                expected = b"Message received.\n" if message and not error else b""
                 assert response == expected, response
         output, errors = process.communicate(timeout=5)
         if reset:
             assert process.returncode == 1, (process.returncode, errors)
             assert b"recv:" in errors, errors
             return
+        if error:
+            assert process.returncode == 1, (process.returncode, errors)
+            assert error in errors, errors
+            assert b"Method:" not in output, output
+            return
         assert process.returncode == 0, errors
         assert f"Listening on 127.0.0.1:{port}".encode() in output, output
         assert b"Client connected." in output, output
         assert b"Sockets closed. Server exiting." in output, output
         if message:
-            # Even a single sendall can be split across TCP receives.
-            received_log = output.split(b"Received ", 1)[1]
-            count_text, data_log = received_log.split(b" bytes: [", 1)
-            count = int(count_text)
-            assert 0 < count <= min(len(message), 1024), output
-            assert data_log.startswith(message[:count] + b"]\n"), output
+            method, path, version = fields
+            assert b"Method: " + method + b"\n" in output, output
+            assert b"Path: " + path + b"\n" in output, output
+            assert b"Version: " + version + b"\n" in output, output
             assert b"Sent 18 response bytes." in output, output
         else:
             assert b"Client closed the connection without sending data." in output, output
@@ -92,8 +101,33 @@ with socket.socket() as temporary:
 check_connection(executable, custom_port, [str(custom_port)])
 check_connection(executable, custom_port, [str(custom_port)])
 print("PASS: custom port and immediate restart")
-for message in (b"x", b"before\x00after", b"x" * 1024, b""):
-    check_connection(executable, custom_port, [str(custom_port)], message)
-print("PASS: one byte, embedded NUL, full buffer, orderly EOF without data")
+for path, version in ((b"/index.html", b"HTTP/1.1"), (b"/", b"HTTP/1.0"),
+                      (b"/search?q=test", b"HTTP/1.1"),
+                      (b"/" + b"x" * 1008, b"HTTP/1.1")):
+    message = b"GET " + path + b" " + version + b"\r\n"
+    check_connection(executable, custom_port, [str(custom_port)], message,
+                     fields=(b"GET", path, version))
+print("PASS: paths, HTTP/1.0 and HTTP/1.1, exact 1024-byte line")
+check_connection(executable, custom_port, [str(custom_port)],
+                 b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+check_connection(executable, custom_port, [str(custom_port)],
+                 fragments=[b"G", b"ET / HT", b"TP/1.1\r", b"\n"])
+print("PASS: trailing headers ignored, fragmented line and split CRLF")
+for message in (b"\r\n", b"GET\r\n", b"GET /\r\n", b"GET  / HTTP/1.1\r\n",
+                b" GET / HTTP/1.1\r\n", b"GET / HTTP/1.1 extra\r\n",
+                b"GET / HTTP/1.1 \r\n", b"GET / HTTP/2.0\r\n",
+                b"GET / HTTP/1.1\n", b"GET / HTTP/1.1\rX\n",
+                b"GET relative HTTP/1.1\r\n", b"GE(T / HTTP/1.1\r\n",
+                b"GET\t/ HTTP/1.1\r\n", b"GET /a\x00b HTTP/1.1\r\n",
+                b"GET /a\tb HTTP/1.1\r\n", b"GET /\xff HTTP/1.1\r\n"):
+    check_connection(executable, custom_port, [str(custom_port)], message,
+                     error=b"Malformed request line.")
+for message in (b"G", b"GET / HTTP/1.1", b"GET / HTTP/1.1\r"):
+    check_connection(executable, custom_port, [str(custom_port)], message,
+                     error=b"Incomplete request line:")
+check_connection(executable, custom_port, [str(custom_port)], b"x" * 1024,
+                 error=b"Request line too long:")
+check_connection(executable, custom_port, [str(custom_port)], b"")
+print("PASS: malformed, incomplete, overlong lines and EOF without data")
 check_connection(executable, custom_port, [str(custom_port)], reset=True)
 print("PASS: connection reset reported without signal termination")

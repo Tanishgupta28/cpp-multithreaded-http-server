@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cstdio>
 #include <iostream>
+#include <string>
 #include <string_view>
 
 bool close_socket(int socket_fd) {
@@ -16,26 +17,82 @@ bool close_socket(int socket_fd) {
     return true;
 }
 
-bool communicate_with_client(int client_socket) {
-    char buffer[1024];
-    ssize_t bytes_received;
-    do {
-        bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
-    } while (bytes_received == -1 && errno == EINTR);
-
-    if (bytes_received == -1) {
-        std::perror("recv");
+bool parse_request_line(std::string_view line) {
+    const auto first_space = line.find(' ');
+    if (first_space == std::string_view::npos || first_space == 0) {
         return false;
     }
-    if (bytes_received == 0) {
-        std::cout << "Client closed the connection without sending data.\n";
-        return true;
+    const auto second_space = line.find(' ', first_space + 1);
+    if (second_space == std::string_view::npos || second_space == first_space + 1) {
+        return false;
     }
+    const auto method = line.substr(0, first_space);
+    const auto path = line.substr(first_space + 1, second_space - first_space - 1);
+    const auto version = line.substr(second_space + 1);
 
-    // TCP provides bytes, not complete messages or null-terminated strings.
-    std::cout << "Received " << bytes_received << " bytes: [";
-    std::cout.write(buffer, bytes_received);
-    std::cout << "]\n";
+    // HTTP method tokens allow letters, digits, and these punctuation marks.
+    constexpr std::string_view punctuation = "!#$%&'*+-.^_`|~";
+    for (unsigned char character : method) {
+        const bool letter = (character >= 'A' && character <= 'Z')
+                         || (character >= 'a' && character <= 'z');
+        const bool digit = character >= '0' && character <= '9';
+        if (!letter && !digit && punctuation.find(character) == std::string_view::npos) {
+            return false;
+        }
+    }
+    if (path.front() != '/' || (version != "HTTP/1.0" && version != "HTTP/1.1")) {
+        return false;
+    }
+    for (unsigned char character : path) {
+        if (character <= 32 || character >= 127) {
+            return false;
+        }
+    }
+    std::cout << "Method: " << method << '\n'
+              << "Path: " << path << '\n'
+              << "Version: " << version << '\n';
+    return true;
+}
+
+bool communicate_with_client(int client_socket) {
+    constexpr std::size_t max_request_line_bytes = 1024;
+    char buffer[max_request_line_bytes];
+    std::string received;
+    while (true) {
+        ssize_t bytes_received;
+        do {
+            bytes_received = recv(client_socket, buffer,
+                                  max_request_line_bytes - received.size(), 0);
+        } while (bytes_received == -1 && errno == EINTR);
+
+        if (bytes_received == -1) {
+            std::perror("recv");
+            return false;
+        }
+        if (bytes_received == 0) {
+            if (received.empty()) {
+                std::cout << "Client closed the connection without sending data.\n";
+                return true;
+            }
+            std::cerr << "Incomplete request line: client closed before CRLF.\n";
+            return false;
+        }
+        // recv() supplies a byte count, not a null-terminated string or a full line.
+        received.append(buffer, static_cast<std::size_t>(bytes_received));
+        const auto newline = received.find('\n');
+        if (newline != std::string::npos) {
+            if (newline == 0 || received[newline - 1] != '\r'
+                || !parse_request_line(std::string_view(received.data(), newline - 1))) {
+                std::cerr << "Malformed request line.\n";
+                return false;
+            }
+            break;
+        }
+        if (received.size() == max_request_line_bytes) {
+            std::cerr << "Request line too long: limit is 1024 bytes including CRLF.\n";
+            return false;
+        }
+    }
 
     constexpr std::string_view response = "Message received.\n";
     std::size_t bytes_sent = 0;
