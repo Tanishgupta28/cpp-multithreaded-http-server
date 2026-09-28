@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 3 complete. Stopped; awaiting authorization for Stage 4.**
+Current stage: **Stage 4 complete. Stopped; awaiting authorization for Stage 5.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -8,7 +8,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 1 | Project foundation and basic TCP server | Complete |
 | 2 | Accept and communicate with TCP clients | Complete |
 | 3 | Parse basic HTTP requests | Complete |
-| 4 | Generate valid HTTP responses | Upcoming |
+| 4 | Generate valid HTTP responses | Complete |
 | 5 | Refactor into clean C++ classes | Upcoming |
 | 6 | Handle multiple clients concurrently | Upcoming |
 | 7 | Implement a fixed-size thread pool | Upcoming |
@@ -86,3 +86,29 @@ If synchronization fails, record it here and preserve the local history.
   Invalid lines produce a diagnostic, no reply, and exit status 1. Empty EOF
   retains Stage 2's successful exit. EINTR and partial-send paths remain reviewed
   rather than fault-injected. No concurrency, routing, files, or cache added.
+
+## Stage 4 validation — 2026-09-28
+
+- Same Alpine WSL2 toolchain as previous stages.
+- `cmake -S . -B build` and `cmake --build build`: passed without warnings.
+- `ctest --test-dir build --output-on-failure -V`: 1/1 test passed. Each valid
+  request checks HTTP/1.1 200 OK, Content-Type, Content-Length against body bytes,
+  Connection: close, CRLF framing, the blank separator, and the exact body.
+  Each malformed, incomplete, or overlong line checks an HTTP 400 response with
+  the same framing and length checks. All prior parser and socket checks passed.
+- Manual netcat requests: `GET / HTTP/1.1` with Host and a blank line returned
+  200 OK and `Hello from C++ HTTP server!\n` (28 body bytes, 112 response bytes).
+  `GET / WRONG` returned 400 Bad Request and `Bad Request\n` (12 body bytes,
+  105 response bytes). Both clients exited 0; server exits were 0 and 1 respectively.
+- Response construction uses the actual body size and the existing partial-send
+  loop with EINTR retry and MSG_NOSIGNAL. Both sockets are closed on all normal
+  success/error paths. Send failures and partial sends remain reviewed rather
+  than fault-injected.
+- Assumptions: emit HTTP/1.1 for all replies, independent of the parsed version.
+  All syntactically valid request lines get the same fixed response. Malformed,
+  incomplete, and overlong input gets 400 if the peer can still receive; empty
+  EOF still receives nothing. Rejected requests preserve exit status 1.
+- Limits retained: one client, request-line-only parsing, 1,024-byte line limit,
+  no timeout, no method-specific behavior or body handling. Unread trailing data
+  can cause a reset at close. No routing, static files, concurrency, thread pool,
+  caching, advanced headers, or persistent connections added.

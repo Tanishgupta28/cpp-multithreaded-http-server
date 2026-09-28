@@ -54,47 +54,15 @@ bool parse_request_line(std::string_view line) {
     return true;
 }
 
-bool communicate_with_client(int client_socket) {
-    constexpr std::size_t max_request_line_bytes = 1024;
-    char buffer[max_request_line_bytes];
-    std::string received;
-    while (true) {
-        ssize_t bytes_received;
-        do {
-            bytes_received = recv(client_socket, buffer,
-                                  max_request_line_bytes - received.size(), 0);
-        } while (bytes_received == -1 && errno == EINTR);
+bool send_response(int client_socket, std::string_view status, std::string_view body) {
+    std::string response = "HTTP/1.1 ";
+    response += status;
+    response += "\r\nContent-Type: text/plain\r\nContent-Length: ";
+    // Content-Length counts body bytes, including its final newline.
+    response += std::to_string(body.size());
+    response += "\r\nConnection: close\r\n\r\n";
+    response += body;
 
-        if (bytes_received == -1) {
-            std::perror("recv");
-            return false;
-        }
-        if (bytes_received == 0) {
-            if (received.empty()) {
-                std::cout << "Client closed the connection without sending data.\n";
-                return true;
-            }
-            std::cerr << "Incomplete request line: client closed before CRLF.\n";
-            return false;
-        }
-        // recv() supplies a byte count, not a null-terminated string or a full line.
-        received.append(buffer, static_cast<std::size_t>(bytes_received));
-        const auto newline = received.find('\n');
-        if (newline != std::string::npos) {
-            if (newline == 0 || received[newline - 1] != '\r'
-                || !parse_request_line(std::string_view(received.data(), newline - 1))) {
-                std::cerr << "Malformed request line.\n";
-                return false;
-            }
-            break;
-        }
-        if (received.size() == max_request_line_bytes) {
-            std::cerr << "Request line too long: limit is 1024 bytes including CRLF.\n";
-            return false;
-        }
-    }
-
-    constexpr std::string_view response = "Message received.\n";
     std::size_t bytes_sent = 0;
     while (bytes_sent < response.size()) {
         // Suppress SIGPIPE so a disconnected peer produces an error return.
@@ -116,6 +84,52 @@ bool communicate_with_client(int client_socket) {
     }
     std::cout << "Sent " << bytes_sent << " response bytes.\n";
     return true;
+}
+
+bool communicate_with_client(int client_socket) {
+    constexpr std::size_t max_request_line_bytes = 1024;
+    char buffer[max_request_line_bytes];
+    std::string received;
+    while (true) {
+        ssize_t bytes_received;
+        do {
+            bytes_received = recv(client_socket, buffer,
+                                  max_request_line_bytes - received.size(), 0);
+        } while (bytes_received == -1 && errno == EINTR);
+
+        if (bytes_received == -1) {
+            std::perror("recv");
+            return false;
+        }
+        if (bytes_received == 0) {
+            if (received.empty()) {
+                std::cout << "Client closed the connection without sending data.\n";
+                return true;
+            }
+            std::cerr << "Incomplete request line: client closed before CRLF.\n";
+            send_response(client_socket, "400 Bad Request", "Bad Request\n");
+            return false;
+        }
+        // recv() supplies a byte count, not a null-terminated string or a full line.
+        received.append(buffer, static_cast<std::size_t>(bytes_received));
+        const auto newline = received.find('\n');
+        if (newline != std::string::npos) {
+            if (newline == 0 || received[newline - 1] != '\r'
+                || !parse_request_line(std::string_view(received.data(), newline - 1))) {
+                std::cerr << "Malformed request line.\n";
+                send_response(client_socket, "400 Bad Request", "Bad Request\n");
+                return false;
+            }
+            break;
+        }
+        if (received.size() == max_request_line_bytes) {
+            std::cerr << "Request line too long: limit is 1024 bytes including CRLF.\n";
+            send_response(client_socket, "400 Bad Request", "Bad Request\n");
+            return false;
+        }
+    }
+
+    return send_response(client_socket, "200 OK", "Hello from C++ HTTP server!\n");
 }
 
 int main(int argc, char* argv[]) {

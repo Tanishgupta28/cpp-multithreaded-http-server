@@ -7,6 +7,20 @@ import sys
 import time
 
 
+def check_response(response, bad_request):
+    headers, separator, body = response.partition(b"\r\n\r\n")
+    assert separator == b"\r\n\r\n", response
+    lines = headers.split(b"\r\n")
+    status = b"400 Bad Request" if bad_request else b"200 OK"
+    expected_body = b"Bad Request\n" if bad_request else b"Hello from C++ HTTP server!\n"
+    assert lines[0] == b"HTTP/1.1 " + status, lines[0]
+    assert len(lines) == 4, lines
+    assert lines[1] == b"Content-Type: text/plain", lines
+    assert lines[2] == b"Content-Length: " + str(len(body)).encode(), lines
+    assert lines[3] == b"Connection: close", lines
+    assert body == expected_body, body
+
+
 def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
                      reset=False, error=None, fields=(b"GET", b"/", b"HTTP/1.1"),
                      fragments=None):
@@ -43,8 +57,10 @@ def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
                     if not chunk:
                         break
                     response += chunk
-                expected = b"Message received.\n" if message and not error else b""
-                assert response == expected, response
+                if message:
+                    check_response(response, bad_request=bool(error))
+                else:
+                    assert response == b"", response
         output, errors = process.communicate(timeout=5)
         if reset:
             assert process.returncode == 1, (process.returncode, errors)
@@ -64,7 +80,7 @@ def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
             assert b"Method: " + method + b"\n" in output, output
             assert b"Path: " + path + b"\n" in output, output
             assert b"Version: " + version + b"\n" in output, output
-            assert b"Sent 18 response bytes." in output, output
+            assert f"Sent {len(response)} response bytes.".encode() in output, output
         else:
             assert b"Client closed the connection without sending data." in output, output
         assert not errors, errors
@@ -93,7 +109,7 @@ with socket.socket() as occupied:
 print("PASS: occupied port reported")
 
 check_connection(executable, 8080, [])
-print("PASS: default port, received data, response, clean EOF and exit")
+print("PASS: 200 status, CRLF headers, Content-Length, body, clean EOF and exit")
 with socket.socket() as temporary:
     temporary.bind(("127.0.0.1", 0))
     custom_port = temporary.getsockname()[1]
@@ -128,6 +144,6 @@ for message in (b"G", b"GET / HTTP/1.1", b"GET / HTTP/1.1\r"):
 check_connection(executable, custom_port, [str(custom_port)], b"x" * 1024,
                  error=b"Request line too long:")
 check_connection(executable, custom_port, [str(custom_port)], b"")
-print("PASS: malformed, incomplete, overlong lines and EOF without data")
+print("PASS: 400 responses for malformed/incomplete/overlong lines; empty EOF")
 check_connection(executable, custom_port, [str(custom_port)], reset=True)
 print("PASS: connection reset reported without signal termination")
