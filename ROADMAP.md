@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 7 complete. Stopped; awaiting authorization for Stage 8.**
+Current stage: **Stage 8 complete. Stopped; awaiting authorization for Stage 9.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -12,7 +12,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 5 | Refactor into clean C++ classes | Complete |
 | 6 | Handle multiple clients concurrently | Complete |
 | 7 | Implement a fixed-size thread pool | Complete |
-| 8 | Implement a thread-safe task queue using std::mutex and std::condition_variable | Upcoming |
+| 8 | Implement a thread-safe task queue using std::mutex and std::condition_variable | Complete |
 | 9 | HTTP routing, including GET / and GET /health | Upcoming |
 | 10 | Serve static files | Upcoming |
 | 11 | LRU cache using unordered_map and a doubly linked list, average O(1) lookup/update | Upcoming |
@@ -201,3 +201,38 @@ If synchronization fails, record it here and preserve the local history.
   Console output can interleave. Partial startup and fatal-accept cleanup were
   reviewed, not fault-injected; previous syscall-testing limits still apply.
   No routing, static files, caching, persistent connections, or advanced HTTP added.
+
+## Stage 8 validation — 2026-09-28
+
+- Added `ClientTaskQueue` using std::queue<int>, std::mutex, and
+  std::condition_variable. One producer in `TcpServer::run()` accepts and pushes;
+  four unchanged-count consumers wait/pop, handle a client, close it, and repeat.
+- The wait predicate is closed-or-nonempty. Push notifies one worker after
+  unlocking. Queue closure notifies all; consumers drain pending work then exit.
+  Mutex scope is limited to queue and closed-state access, never client I/O.
+- Ownership transfers producer -> queue -> worker. Enqueue failure closes the
+  producer-owned socket; workers retain existing per-client cleanup. Listener and
+  queue outlive all workers. Partial startup closes the empty queue and joins
+  started workers. Accept/enqueue failure stops accepting and drains/joins; slow
+  clients can still delay this internal cleanup. No signal framework added.
+- Preserved main.cpp, HttpRequest, HttpResponse, all existing HTTP/socket test
+  cases, and four worker IDs. Stage 7's kernel backlog remains for unaccepted
+  connections; Stage 8 additionally holds accepted descriptors in application FIFO.
+- Same Alpine WSL2 toolchain. `cmake -S . -B build` and
+  `cmake --build build --clean-first`: passed without warnings.
+- `ctest --test-dir build --output-on-failure -V`: 2/2 passed. New C++ tests cover
+  FIFO, blocking pop, push wakeup, close wakeup, draining, idempotent close, and
+  rejected pushes after close. Integration tests preserve earlier cases and
+  verify 12 accepted sockets with four occupied workers, eight queued clients,
+  unchanged thread IDs, and one released worker processing waiting tasks.
+- Idle validation observed all four workers in Linux futex waits with at most
+  two total CPU ticks over 200 ms. Three waves of 32 mixed 200/400 requests passed,
+  with sleeping and successful wakeups between waves. Correctness, not a benchmark.
+- Manual netcat check: six accepted clients while four workers held partial
+  lines, two pending application tasks, all six eventually returned 200. Thread
+  count stayed five including main; test process was stopped afterward.
+- Limits: unbounded FIFO can exhaust memory/descriptors; four stalled workers
+  delay queued clients. No timeout, overload policy, graceful shutdown, serialized
+  logging, routing, files, cache, persistent HTTP, or advanced parsing added.
+  Startup/allocation failures and rare syscall failures remain reviewed rather
+  than fault-injected. Linux /proc idle checks require readable wchan files.

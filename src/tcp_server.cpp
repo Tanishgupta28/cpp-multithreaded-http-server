@@ -1,4 +1,5 @@
 #include "tcp_server.h"
+#include "client_task_queue.h"
 #include "http_request.h"
 #include "http_response.h"
 
@@ -10,7 +11,6 @@
 #include <cerrno>
 #include <cstdio>
 #include <iostream>
-#include <mutex>
 #include <string>
 #include <thread>
 
@@ -119,25 +119,16 @@ void TcpServer::handle_client(int client_socket) {
     }
 }
 
-void TcpServer::worker_loop(int server_socket) {
-    while (true) {
-        // The kernel gives each accept() caller its own connected client socket.
-        const int client_socket = accept(server_socket, nullptr, nullptr);
-        if (client_socket == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            std::perror("accept");
-            // Wake other workers blocked in accept(); run() closes after joining.
-            shutdown(server_socket, SHUT_RDWR);
-            return;
-        }
-        std::cout << "Client connected." << std::endl;
+void TcpServer::worker_loop(ClientTaskQueue& tasks) {
+    int client_socket;
+    while (tasks.pop(client_socket)) {
+        // pop has released the queue mutex; all client I/O happens outside it.
         handle_client(client_socket);
     }
 }
 
 int TcpServer::run() const {
+    ClientTaskQueue tasks;
     const int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == -1) {
         std::perror("socket");
@@ -172,27 +163,13 @@ int TcpServer::run() const {
     }
     constexpr std::size_t worker_count = 4;
     std::array<std::thread, worker_count> workers;
-    std::mutex startup_mutex;
-    std::unique_lock<std::mutex> startup_lock(startup_mutex);
-    bool pool_ready = false;
-
     try {
         for (auto& worker : workers) {
-            worker = std::thread([server_socket, &startup_mutex, &pool_ready] {
-                // No client is accepted until every worker has been created.
-                // Partial startup can therefore join workers without waiting on clients.
-                {
-                    std::lock_guard<std::mutex> lock(startup_mutex);
-                    if (!pool_ready) {
-                        return;
-                    }
-                }
-                worker_loop(server_socket);
-            });
+            worker = std::thread([&tasks] { worker_loop(tasks); });
         }
     } catch (const std::exception& error) {
         std::cerr << "Thread pool startup failed: " << error.what() << '\n';
-        startup_lock.unlock();
+        tasks.close();
         for (auto& worker : workers) {
             if (worker.joinable()) {
                 worker.join();
@@ -204,11 +181,33 @@ int TcpServer::run() const {
 
     std::cout << "Listening on 127.0.0.1:" << port_
               << " (4 reusable workers; stop with Ctrl+C)" << std::endl;
-    pool_ready = true;
-    startup_lock.unlock();
+    while (true) {
+        const int client_socket = accept(server_socket, nullptr, nullptr);
+        if (client_socket == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::perror("accept");
+            break;
+        }
+        try {
+            if (!tasks.push(client_socket)) {
+                close_socket(client_socket);
+                break;
+            }
+        } catch (const std::exception& error) {
+            // A failed insertion leaves ownership with the accepting thread.
+            std::cerr << "Client enqueue failed: " << error.what() << '\n';
+            close_socket(client_socket);
+            break;
+        }
+        std::cout << "Client connected." << std::endl;
+    }
+
+    close_socket(server_socket);
+    tasks.close();
     for (auto& worker : workers) {
         worker.join();
     }
-    close_socket(server_socket);
-    return 1; // Workers normally run indefinitely; returning means accept() failed.
+    return 1; // Normal operation runs until the process is stopped externally.
 }

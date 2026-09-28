@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import tempfile
+from pathlib import Path
 
 
 def check_response(response, bad_request):
@@ -233,10 +234,31 @@ def check_fixed_pool():
                 assert time.monotonic() < deadline, "Pool did not become ready"
                 time.sleep(0.01)
 
+        def check_idle_workers(original_threads):
+            worker_ids = original_threads - {str(process.pid)}
+            def states():
+                return [Path(f"/proc/{process.pid}/task/{tid}/wchan").read_text()
+                        for tid in worker_ids]
+            deadline = time.monotonic() + 5
+            while not all("futex" in state for state in states()):
+                assert time.monotonic() < deadline, states()
+                time.sleep(0.01)
+            def cpu_ticks():
+                total = 0
+                for tid in worker_ids:
+                    fields = Path(f"/proc/{process.pid}/task/{tid}/stat").read_text().rsplit(")", 1)[1].split()
+                    total += int(fields[11]) + int(fields[12])
+                return total
+            before = cpu_ticks()
+            time.sleep(0.2)
+            assert cpu_ticks() - before <= 2, "Idle workers consumed CPU instead of sleeping"
+            assert all("futex" in state for state in states())
+
         try:
             wait_for_log(b"4 reusable workers")
             original_threads = thread_ids()
             assert len(original_threads) == 5, original_threads
+            check_idle_workers(original_threads)
             for index in range(4):
                 client = socket.create_connection(("127.0.0.1", custom_port), 2)
                 clients.append(client)
@@ -244,12 +266,18 @@ def check_fixed_pool():
                 wait_for_log(b"Client connected.", index + 1)
             assert thread_ids() == original_threads
 
-            # All workers are occupied; these eight connections wait in the kernel.
+            # All workers are occupied; the producer must still accept and enqueue.
             for index in range(8):
                 client = socket.create_connection(("127.0.0.1", custom_port), 2)
                 clients.append(client)
                 client.sendall(b"GET /queued HTTP/1.1\r\n")
                 assert thread_ids() == original_threads
+            wait_for_log(b"Client connected.", 12)
+            # The server now owns 12 accepted sockets plus its listener. Stage 7
+            # had only four accepted sockets here; the remainder stayed in the kernel.
+            server_sockets = [name for name in os.listdir(f"/proc/{process.pid}/fd")
+                              if os.readlink(f"/proc/{process.pid}/fd/{name}").startswith("socket:")]
+            assert len(server_sockets) == 13, server_sockets
             ready, _, _ = select.select(clients[4:], [], [], 0.15)
             assert not ready, "A response arrived while all four workers were blocked"
             assert thread_ids() == original_threads
@@ -265,6 +293,20 @@ def check_fixed_pool():
                 check_response(read_response(client), bad_request=False)
             wait_for_log(b"Client socket closed.", 12)
             assert thread_ids() == original_threads, "Workers were replaced instead of reused"
+            check_idle_workers(original_threads)
+            for wave in range(3):
+                wave_clients = []
+                for index in range(32):
+                    client = socket.create_connection(("127.0.0.1", custom_port), 2)
+                    clients.append(client)
+                    wave_clients.append(client)
+                    client.sendall(b"GET / WRONG\r\n" if index % 3 == 0
+                                   else b"GET /stress HTTP/1.1\r\n")
+                for index, client in enumerate(wave_clients):
+                    check_response(read_response(client), bad_request=(index % 3 == 0))
+                    client.close()
+                assert thread_ids() == original_threads
+                check_idle_workers(original_threads)
             assert process.poll() is None
         finally:
             for client in clients:
@@ -274,4 +316,4 @@ def check_fixed_pool():
 
 
 check_fixed_pool()
-print("PASS: four fixed worker IDs, 12 clients, saturation, queued service and worker reuse")
+print("PASS: application queue, four fixed workers, idle sleep/wake, 12 queued/active clients and 96 stress requests")
