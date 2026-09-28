@@ -3,9 +3,10 @@
 ## Overview
 
 An incremental C++ systems programming project working toward a multithreaded
-HTTP server. Stage 4 accepts one IPv4 TCP connection, collects and parses a basic
+HTTP server. The server accepts one IPv4 TCP connection, collects and parses a basic
 HTTP request line, prints its fields, sends an HTTP response, and closes both
-sockets. Concurrency is not yet implemented.
+sockets. Stage 5 separates these responsibilities into simple C++ classes without
+changing the Stage 4 behavior. Concurrency is not yet implemented.
 
 ## Features
 
@@ -22,22 +23,45 @@ sockets. Concurrency is not yet implemented.
 
 ## Architecture
 
-One process follows the socket lifecycle directly in `src/main.cpp`:
+`main.cpp` validates the command-line port and calls `TcpServer::run()`.
+The three classes have distinct responsibilities:
+
+| Class | Responsibility |
+| --- | --- |
+| `TcpServer` | Socket setup, one accepted connection, bounded receives, diagnostics, partial sends, and socket cleanup. |
+| `HttpRequest` | Validate the request line and store its method, path, and version as owned strings. No socket I/O or printing. |
+| `HttpResponse` | Own the status and body and serialize the same HTTP/1.1 response bytes, including CRLF and Content-Length. No socket I/O. |
+
+```mermaid
+flowchart LR
+    Main[main: validate port] --> Server[TcpServer: socket lifecycle]
+    Server --> Request[HttpRequest: parse fields]
+    Server --> Response[HttpResponse: build response bytes]
+```
+
+The socket lifecycle remains visible in `src/tcp_server.cpp`:
 
 ```text
 socket → setsockopt → bind → listen → accept → recv line → parse → send → close sockets
 ```
 
 `accept()` blocks until a client connects and returns a separate socket for that
-client. `communicate_with_client()` collects a line and calls the small
-`parse_request_line()` function. Valid input gets a fixed 200 OK response.
-`send_response()` builds the status line and headers, computes the body byte
-length, appends the blank line and body, and sends the resulting string.
+client. `TcpServer::communicate_with_client()` collects a line, calls
+`HttpRequest::parse_request_line()`, and prints the fields. Valid input gets a
+fixed 200 OK response. `HttpResponse::serialize()` builds the status line,
+headers, computed body length, blank line, and body. `TcpServer::send_response()`
+sends that string.
 The server retries interrupted calls and loops until all response
 bytes have been sent. `MSG_NOSIGNAL` lets a failed send report an error instead
 of terminating the process with SIGPIPE. Both sockets are closed even if
 communication fails. The process returns 0 on success (including EOF before any
 data) and 1 for invalid arguments, invalid request lines, or system-call errors.
+
+`TcpServer` stores only the port. Its `run()` function owns the local listening
+and client descriptors and explicitly closes them on the existing success and
+error paths. Helper methods borrow the client descriptor. Request and response
+objects own their strings, so their data does not depend on receive-buffer
+lifetimes. No inheritance, shared ownership, or design-pattern framework is used.
 
 TCP is a byte stream: one `recv()` need not contain everything the client sent.
 The server appends exactly the received byte count until a newline arrives,
@@ -66,13 +90,16 @@ data while it closes may cause a TCP reset because unread data can remain.
 
 C++17, CMake, TCP/IP, POSIX sockets, file descriptors, network byte order,
 blocking system calls, byte streams, partial sends, HTTP request-line syntax,
-status lines, response headers, body lengths,
+status lines, response headers, body lengths, basic classes and encapsulation,
 and basic error handling.
 Python 3 is used only for tests.
 
 ## Project Structure
 
-- `src/main.cpp`: socket lifecycle, request-line parsing, and response generation.
+- `src/main.cpp`: port validation and server startup.
+- `include/tcp_server.h`, `src/tcp_server.cpp`: socket lifecycle and client I/O.
+- `include/http_request.h`, `src/http_request.cpp`: request-line parsing and fields.
+- `include/http_response.h`, `src/http_response.cpp`: HTTP response construction.
 - `tests/tcp_smoke.py`: real-process TCP checks using Python's standard library.
 - `CMakeLists.txt`: executable, compiler warnings, and optional CTest integration.
 - `AGENTS.md`: permanent development rules.
@@ -90,7 +117,7 @@ sudo apt-get install build-essential cmake python3
 ```
 
 On Alpine Linux, run `apk add --no-cache build-base cmake python3` as root.
-Stages 1 through 4 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
+Stages 1 through 5 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
 CMake 3.31.7, and Python 3.12.14.
 
 On this Windows development machine, enter the installed Linux environment:
@@ -213,3 +240,5 @@ require a loop, and how EOF differs from a receive error. Explain how a bounded
 receive loop reconstructs a request line and why parsing that line does not
 mean that a complete HTTP request has been read or handled. Explain how a status
 line, headers, CRLF blank line, and a byte-counted body form an HTTP response.
+Explain how separating socket I/O from parsing and serialization keeps each
+class focused while preserving the observable behavior of the server.

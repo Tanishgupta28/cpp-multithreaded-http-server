@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 4 complete. Stopped; awaiting authorization for Stage 5.**
+Current stage: **Stage 5 complete. Stopped; awaiting authorization for Stage 6.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -9,7 +9,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 2 | Accept and communicate with TCP clients | Complete |
 | 3 | Parse basic HTTP requests | Complete |
 | 4 | Generate valid HTTP responses | Complete |
-| 5 | Refactor into clean C++ classes | Upcoming |
+| 5 | Refactor into clean C++ classes | Complete |
 | 6 | Handle multiple clients concurrently | Upcoming |
 | 7 | Implement a fixed-size thread pool | Upcoming |
 | 8 | Implement a thread-safe task queue using std::mutex and std::condition_variable | Upcoming |
@@ -112,3 +112,26 @@ If synchronization fails, record it here and preserve the local history.
   no timeout, no method-specific behavior or body handling. Unread trailing data
   can cause a reset at close. No routing, static files, concurrency, thread pool,
   caching, advanced headers, or persistent connections added.
+
+## Stage 5 validation — 2026-09-28
+
+- Refactor only: `TcpServer` handles socket setup, bounded receive, logging,
+  sending, and explicit cleanup. `HttpRequest` parses and owns the three
+  request-line fields. `HttpResponse` owns status/body and serializes the existing
+  response format. `main.cpp` only validates the port and starts the server.
+- Added three header/source pairs and updated CMake. No inheritance or shared
+  ownership; socket descriptors remain local to `TcpServer::run()`, with I/O
+  helpers borrowing the client descriptor. Request/response data uses owned strings.
+- Same Alpine WSL2 toolchain as previous stages. `cmake -S . -B build` and
+  `cmake --build build --clean-first` passed without warnings.
+- `ctest --test-dir build --output-on-failure -V`: 1/1 test passed. The existing
+  test file is unchanged; it checks response bytes, parsing, fragmented and
+  invalid input, port arguments, EOF, reset handling, and exit status.
+- Reused the Stage 4 manual netcat checks: valid input returned 200 with a 28-byte
+  body (112 response bytes); malformed input returned 400 with a 12-byte body
+  (105 response bytes). Client exits were 0; server exits remained 0 and 1.
+- No intended externally visible behavior changes. Existing limits remain:
+  one client, 1,024-byte request line, no timeout, header/body processing,
+  method-specific behavior, routing, static files, concurrency, pool, caching,
+  or persistent connections. Unread trailing data can still cause a TCP reset.
+  Rare syscall failures and partial-send/EINTR paths were not fault-injected.

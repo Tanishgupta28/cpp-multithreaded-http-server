@@ -5,7 +5,13 @@ if(NOT UNIX)
     message(FATAL_ERROR "This project requires POSIX sockets. On Windows, build inside Linux/WSL.")
 endif()
 
-add_executable(http_server src/main.cpp)
+add_executable(http_server
+    src/main.cpp
+    src/tcp_server.cpp
+    src/http_request.cpp
+    src/http_response.cpp
+)
+target_include_directories(http_server PRIVATE include)
 target_compile_features(http_server PRIVATE cxx_std_17)
 set_target_properties(http_server PROPERTIES CXX_EXTENSIONS OFF)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
