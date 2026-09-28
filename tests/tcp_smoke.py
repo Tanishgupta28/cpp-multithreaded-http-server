@@ -1,6 +1,7 @@
 """Exercise the real server process with a TCP client (no third-party packages)."""
 
 import os
+import select
 import socket
 import struct
 import subprocess
@@ -214,3 +215,63 @@ def check_concurrency():
 
 check_concurrency()
 print("PASS: overlapping clients, two slow clients, mixed 200/400, continued service")
+
+
+def check_fixed_pool():
+    with tempfile.TemporaryFile() as log:
+        process = subprocess.Popen([executable, str(custom_port)], stdout=log, stderr=log)
+        clients = []
+
+        def thread_ids():
+            # Linux /proc includes the main thread as well as the four workers.
+            return set(os.listdir(f"/proc/{process.pid}/task"))
+
+        def wait_for_log(marker, count=1):
+            deadline = time.monotonic() + 5
+            while os.pread(log.fileno(), 65536, 0).count(marker) < count:
+                assert process.poll() is None, "Pool server exited"
+                assert time.monotonic() < deadline, "Pool did not become ready"
+                time.sleep(0.01)
+
+        try:
+            wait_for_log(b"4 reusable workers")
+            original_threads = thread_ids()
+            assert len(original_threads) == 5, original_threads
+            for index in range(4):
+                client = socket.create_connection(("127.0.0.1", custom_port), 2)
+                clients.append(client)
+                client.sendall(b"GET /slow")
+                wait_for_log(b"Client connected.", index + 1)
+            assert thread_ids() == original_threads
+
+            # All workers are occupied; these eight connections wait in the kernel.
+            for index in range(8):
+                client = socket.create_connection(("127.0.0.1", custom_port), 2)
+                clients.append(client)
+                client.sendall(b"GET /queued HTTP/1.1\r\n")
+                assert thread_ids() == original_threads
+            ready, _, _ = select.select(clients[4:], [], [], 0.15)
+            assert not ready, "A response arrived while all four workers were blocked"
+            assert thread_ids() == original_threads
+
+            # Free just one worker: it must reuse itself for all eight pending clients.
+            clients[0].sendall(b" HTTP/1.1\r\n")
+            check_response(read_response(clients[0]), bad_request=False)
+            for client in clients[4:]:
+                check_response(read_response(client), bad_request=False)
+                assert thread_ids() == original_threads
+            for client in clients[1:4]:
+                client.sendall(b" HTTP/1.1\r\n")
+                check_response(read_response(client), bad_request=False)
+            wait_for_log(b"Client socket closed.", 12)
+            assert thread_ids() == original_threads, "Workers were replaced instead of reused"
+            assert process.poll() is None
+        finally:
+            for client in clients:
+                client.close()
+            process.kill()
+            process.wait(timeout=5)
+
+
+check_fixed_pool()
+print("PASS: four fixed worker IDs, 12 clients, saturation, queued service and worker reuse")

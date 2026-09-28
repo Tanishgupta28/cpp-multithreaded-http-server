@@ -3,14 +3,14 @@
 ## Overview
 
 An incremental C++ systems programming project working toward a multithreaded
-HTTP server. Stage 6 continuously accepts IPv4 TCP connections and starts one
-thread per client. Each thread parses a basic HTTP request line, prints its
-fields, sends the existing HTTP response, and closes its client socket.
+HTTP server. Stage 7 uses four reusable worker threads. Each worker accepts a
+client, parses a basic HTTP request line, prints its fields, sends the existing
+HTTP response, closes the client socket, and returns to accept another client.
 
 ## Features
 
 - IPv4 TCP listener on loopback (`127.0.0.1`).
-- Concurrent clients using a detached `std::thread` for each accepted connection.
+- Four fixed `std::thread` workers, reused across client connections.
 - Default port 8080, with an optional command-line port from 1 to 65535.
 - Socket address reuse, system-call error reporting, and explicit socket cleanup.
 - Request-line collection across multiple receives, limited to 1,024 bytes.
@@ -28,29 +28,29 @@ The three classes have distinct responsibilities:
 
 | Class | Responsibility |
 | --- | --- |
-| `TcpServer` | Listening socket, accept loop, thread creation, per-client I/O, diagnostics, and socket cleanup. |
+| `TcpServer` | Listening socket, fixed worker startup/join, per-worker accept loops, client I/O, and socket cleanup. |
 | `HttpRequest` | Validate the request line and store its method, path, and version as owned strings. No socket I/O or printing. |
 | `HttpResponse` | Own the status and body and serialize the same HTTP/1.1 response bytes, including CRLF and Content-Length. No socket I/O. |
 
 ```mermaid
 flowchart LR
-    Main[main: validate port] --> Server[TcpServer: accept loop]
-    Server --> A[Client thread A]
-    Server --> B[Client thread B]
-    A --> RequestA[Own request and response]
-    B --> RequestB[Own request and response]
+    Main[main: validate port] --> Server[TcpServer: start four workers]
+    Backlog[Kernel listen backlog] --> Workers[Four workers: accept and handle clients]
+    Server --> Workers
+    Workers --> Data[Per-client request and response]
 ```
 
 The socket lifecycle remains visible in `src/tcp_server.cpp`:
 
 ```text
-listener: socket → setsockopt → bind → listen → repeat accept and start thread
-worker:   recv line → parse → send response → close client socket → return
+main:   socket → setsockopt → bind → listen → start four threads → join
+worker: repeat accept → recv line → parse → send response → close client socket
 ```
 
 `accept()` blocks until a client connects and returns a separate socket for that
-client. `TcpServer::run()` passes that descriptor by value to a new thread running
-the static `handle_client()` function, then detaches it and returns to `accept()`.
+client. All four workers call `accept()` on the shared listener; the kernel
+assigns each connection to one caller. No new thread is created for a client.
+The accepting worker calls `handle_client()`, then returns to its accept loop.
 Inside the worker, `TcpServer::communicate_with_client()` collects a line, calls
 `HttpRequest::parse_request_line()`, and prints the fields. Valid input gets a
 fixed 200 OK response. `HttpResponse::serialize()` builds the status line,
@@ -59,27 +59,36 @@ sends that string.
 The server retries interrupted calls and loops until all response
 bytes have been sent. `MSG_NOSIGNAL` lets a failed send report an error instead
 of terminating the process with SIGPIPE. Client errors close only that connection;
-the listener keeps serving. Invalid arguments, setup errors, or fatal accept
-errors return 1. The accept loop retries EINTR.
+the workers keep serving. Invalid arguments and setup errors return 1. Accept
+retries EINTR. On other accept errors, the listener is shut down to wake workers
+waiting in accept; `run()` joins the workers, closes the listener, and returns 1.
+Workers already handling clients finish first, so a stalled client can delay
+this error cleanup indefinitely. This is not a graceful shutdown framework.
 
-`run()` owns the listening socket and closes it if setup or accept fails. Until
-thread creation succeeds, it also owns the accepted socket. Creation failure
-reports an error, closes that client, and continues accepting. After creation,
-the worker alone closes the client socket, including on a C++ exception. If
-detach unexpectedly fails, the accept loop joins that worker to avoid destroying
-a joinable thread; this rare fallback may wait for a slow client.
+`run()` owns the listener and a fixed array of four joinable threads. The worker
+that accepts a connection exclusively owns and closes that client descriptor,
+including on a C++ exception. Workers do not capture `this`. Every client has
+its own stack buffer, received string, parser object, response, and send offset.
+No application receive buffer or mutable request data is shared.
 
-Workers do not capture `this`. Their static functions need only the descriptor,
-so they do not depend on the lifetime of the `TcpServer` object. Every invocation
-has a separate stack buffer, received string, parser object, response, and send
-offset. No application receive buffer or mutable request data is shared.
+A single startup mutex protects a `pool_ready` flag. The main thread holds it
+while creating the pool; workers briefly acquire it before accepting anything.
+If creation fails partway through, the flag stays false: created workers return,
+the main thread joins them, closes the listener, and exits 1. On success the
+flag becomes true and the mutex is released. It is never used in client handling.
+This small startup gate prevents partially created pools from accepting clients
+that would otherwise block rollback.
 
-This stage deliberately has no thread limit, pool, queue, or idle timeout. Each
-slow client consumes a thread and descriptor; enough clients can exhaust system
-resources. The listen backlog of 16 is a pending-connection queue, not a worker
-limit. Console output from different workers may interleave. Detached workers
-are not joined at process shutdown; Ctrl+C stops the process immediately and
-the OS reclaims descriptors. Graceful shutdown remains a later stage.
+When all four workers are busy, new connections wait in the kernel listen
+backlog (requested size 16, subject to OS limits). Once it fills, connection
+attempts may wait, time out, or fail; there is no application overload response.
+There is no application task queue or condition variable yet: Stage 8 introduces
+the reusable synchronized queue. This stage's pool is specific to socket work.
+
+The worker count is the constant `worker_count = 4` in `TcpServer::run()`.
+There is no idle timeout: four slow clients can occupy the whole pool. Console
+output may interleave. Ctrl+C still stops the process immediately and the OS
+reclaims descriptors; no signal handler or graceful shutdown was added.
 
 TCP is a byte stream: one `recv()` need not contain everything the client sent.
 The server appends exactly the received byte count until a newline arrives,
@@ -109,7 +118,7 @@ data while it closes may cause a TCP reset because unread data can remain.
 C++17, CMake, TCP/IP, POSIX sockets, file descriptors, network byte order,
 blocking system calls, byte streams, partial sends, HTTP request-line syntax,
 status lines, response headers, body lengths, basic classes and encapsulation,
-`std::thread`, per-client ownership,
+`std::thread`, a fixed worker pool, a startup mutex, per-client ownership,
 and basic error handling.
 Python 3 is used only for tests.
 
@@ -136,7 +145,7 @@ sudo apt-get install build-essential cmake python3
 ```
 
 On Alpine Linux, run `apk add --no-cache build-base cmake python3` as root.
-Stages 1 through 6 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
+Stages 1 through 7 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
 CMake 3.31.7, and Python 3.12.14.
 
 On this Windows development machine, enter the installed Linux environment:
@@ -168,7 +177,8 @@ cmake --build build
 
 The listener is local-only and runs until stopped with Ctrl+C. Each client gets
 one request and response, then its socket closes; the listener remains open.
-A partial line blocks only that client's thread, not the accept loop.
+A partial line occupies one worker. Other clients can be accepted while another
+worker is free; with all four occupied, new clients wait.
 
 ## Usage
 
@@ -232,7 +242,7 @@ Or run the checks directly:
 python3 tests/tcp_smoke.py ./build/http_server
 ```
 
-Tests require port 8080 to be free. They verify the default and custom ports,
+Tests require Linux `/proc` and port 8080 to be free. They verify the default and custom ports,
 parsed fields, 200/400 status lines, exact headers, CRLF blank-line separation,
 Content-Length against received body bytes, exact bodies, clean EOF, startup
 exit status, continued service after client completion/errors, immediate
@@ -244,7 +254,14 @@ per-client process-exit assertions replaced by continued-service checks and
 explicit test-process cleanup. A concurrency test leaves two request lines
 incomplete while six other clients get mixed 200/400 responses; then both slow
 clients finish successfully and a fresh connection still works. This fails for
-a sequential server without relying on throughput measurements. Partial sends and
+a sequential server without relying on throughput measurements.
+
+The fixed-pool test records `/proc/<pid>/task` IDs: four workers plus the main
+thread. It holds four slow requests open, connects eight additional clients,
+and verifies no extra threads or responses appear while the pool is saturated.
+Releasing just one slow client lets that same worker serve all eight waiting
+clients. The thread-ID set stays unchanged through completion of all 12 clients.
+Previous tests are retained. Partial sends and
 interrupted system calls are handled in code but not deterministically forced
 by these integration tests. Validation results are recorded
 in [ROADMAP.md](ROADMAP.md). No performance claims are made.
@@ -256,7 +273,8 @@ Linux terminal, then run a normal netcat request in another before the delay end
 { printf 'GET /slow'; sleep 5; printf ' HTTP/1.1\r\n'; } | nc -w 8 127.0.0.1 8080
 ```
 
-The normal client should finish while the slow client's line remains incomplete.
+With only one slow client, the normal client should finish before it. With four
+such slow clients, later clients wait for a worker to become available.
 
 ## Roadmap
 
@@ -274,5 +292,6 @@ mean that a complete HTTP request has been read or handled. Explain how a status
 line, headers, CRLF blank line, and a byte-counted body form an HTTP response.
 Explain how separating socket I/O from parsing and serialization keeps each
 class focused while preserving the observable behavior of the server.
-Explain why a blocked client no longer stalls acceptance, how each worker owns
-its resources, and why unbounded thread creation motivates the next stage.
+Explain how fixed workers are reused, why four slow clients saturate this pool,
+how the kernel assigns accepted connections, and how a future application queue
+will separate acceptance from execution.

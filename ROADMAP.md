@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 6 complete. Stopped; awaiting authorization for Stage 7.**
+Current stage: **Stage 7 complete. Stopped; awaiting authorization for Stage 8.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -11,7 +11,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 4 | Generate valid HTTP responses | Complete |
 | 5 | Refactor into clean C++ classes | Complete |
 | 6 | Handle multiple clients concurrently | Complete |
-| 7 | Implement a fixed-size thread pool | Upcoming |
+| 7 | Implement a fixed-size thread pool | Complete |
 | 8 | Implement a thread-safe task queue using std::mutex and std::condition_variable | Upcoming |
 | 9 | HTTP routing, including GET / and GET /health | Upcoming |
 | 10 | Serve static files | Upcoming |
@@ -167,3 +167,37 @@ If synchronization fails, record it here and preserve the local history.
   while joining. Thread creation/detach failures, worker exceptions, and partial
   sends/EINTR were reviewed but not fault-injected. Existing HTTP limitations
   remain; no routing, files, caching, persistent connections, or body handling.
+
+## Stage 7 validation — 2026-09-28
+
+- Four reusable, joinable workers are created once in `TcpServer::run()`. Each
+  loops over accept/handle/close on the shared listener. The kernel assigns
+  connections to available workers; no per-client thread creation or detach.
+- Stage boundary preserved: pending connections use the kernel listen backlog
+  (16 requested). No application task queue, condition variable, or general
+  thread-pool abstraction. Stage 8 still introduces the reusable synchronized queue.
+- Minimum synchronization: one startup mutex/flag prevents acceptance until all
+  workers exist. Partial creation failure releases workers with the flag false,
+  joins those created, closes the listener, and exits 1. It never locks during
+  client handling. A fatal accept error shuts down the listener to wake other
+  accept calls; workers are joined before closing it. Active clients may delay
+  this error cleanup because there is no timeout or graceful shutdown framework.
+- Socket ownership: run owns the listener; the accepting worker owns each client
+  through cleanup. Every request retains its own buffer, strings, and send offset.
+- `main.cpp`, HTTP classes, and existing CMake Threads::Threads linkage unchanged.
+- Same Alpine WSL2 toolchain. `cmake -S . -B build` and
+  `cmake --build build --clean-first`: passed without warnings.
+- `ctest --test-dir build --output-on-failure -V`: 1/1 passed. All previous cases
+  retained. Added Linux /proc thread-ID checks for four workers plus main, four
+  slow clients and eight waiting connections, no extra workers at saturation,
+  one freed worker serving all eight waiting clients, and unchanged thread IDs
+  after all 12 clients complete. No performance claims are inferred.
+- Manual netcat validation: four delayed requests plus two additional clients;
+  additional responses waited until a worker was free, all six returned 200,
+  and thread count stayed five (main plus four workers) during and after service.
+  The test server was stopped afterward.
+- Limits: four blocked clients saturate the pool; backlog overflow can delay or
+  fail connects. No timeouts, application overload response, or signal handling.
+  Console output can interleave. Partial startup and fatal-accept cleanup were
+  reviewed, not fault-injected; previous syscall-testing limits still apply.
+  No routing, static files, caching, persistent connections, or advanced HTTP added.
