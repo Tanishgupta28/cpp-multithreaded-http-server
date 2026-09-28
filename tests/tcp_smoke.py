@@ -1,10 +1,12 @@
 """Exercise the real server process with a TCP client (no third-party packages)."""
 
+import os
 import socket
 import struct
 import subprocess
 import sys
 import time
+import tempfile
 
 
 def check_response(response, bad_request):
@@ -24,9 +26,10 @@ def check_response(response, bad_request):
 def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
                      reset=False, error=None, fields=(b"GET", b"/", b"HTTP/1.1"),
                      fragments=None):
+    output_file = tempfile.TemporaryFile()
+    error_file = tempfile.TemporaryFile()
     process = subprocess.Popen(
-        [executable, *arguments], stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        [executable, *arguments], stdout=output_file, stderr=error_file,
     )
     try:
         deadline = time.monotonic() + 5
@@ -61,20 +64,26 @@ def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
                     check_response(response, bad_request=bool(error))
                 else:
                     assert response == b"", response
-        output, errors = process.communicate(timeout=5)
+        deadline = time.monotonic() + 5
+        while True:
+            output = os.pread(output_file.fileno(), 65536, 0)
+            if b"Client socket closed." in output:
+                break
+            assert process.poll() is None, "Server exited after a client"
+            assert time.monotonic() < deadline, "Worker did not finish"
+            time.sleep(0.01)
+        assert process.poll() is None, "Server must keep accepting clients"
+        errors = os.pread(error_file.fileno(), 65536, 0)
         if reset:
-            assert process.returncode == 1, (process.returncode, errors)
             assert b"recv:" in errors, errors
             return
         if error:
-            assert process.returncode == 1, (process.returncode, errors)
             assert error in errors, errors
             assert b"Method:" not in output, output
             return
-        assert process.returncode == 0, errors
         assert f"Listening on 127.0.0.1:{port}".encode() in output, output
         assert b"Client connected." in output, output
-        assert b"Sockets closed. Server exiting." in output, output
+        assert b"Client socket closed." in output, output
         if message:
             method, path, version = fields
             assert b"Method: " + method + b"\n" in output, output
@@ -87,7 +96,9 @@ def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
     finally:
         if process.poll() is None:
             process.kill()
-        process.communicate()
+        process.wait(timeout=5)
+        output_file.close()
+        error_file.close()
 
 
 executable = sys.argv[1]
@@ -109,7 +120,7 @@ with socket.socket() as occupied:
 print("PASS: occupied port reported")
 
 check_connection(executable, 8080, [])
-print("PASS: 200 status, CRLF headers, Content-Length, body, clean EOF and exit")
+print("PASS: 200 status, CRLF headers, Content-Length, body, clean EOF and continued service")
 with socket.socket() as temporary:
     temporary.bind(("127.0.0.1", 0))
     custom_port = temporary.getsockname()[1]
@@ -147,3 +158,59 @@ check_connection(executable, custom_port, [str(custom_port)], b"")
 print("PASS: 400 responses for malformed/incomplete/overlong lines; empty EOF")
 check_connection(executable, custom_port, [str(custom_port)], reset=True)
 print("PASS: connection reset reported without signal termination")
+
+
+def read_response(client):
+    response = b""
+    while True:
+        chunk = client.recv(1024)
+        if not chunk:
+            return response
+        response += chunk
+
+
+def check_concurrency():
+    # Keep two incomplete requests open while other clients finish. A sequential
+    # server cannot pass: the slow clients are completed only after the fast ones.
+    with tempfile.TemporaryFile() as log:
+        process = subprocess.Popen([executable, str(custom_port)], stdout=log, stderr=log)
+        clients = []
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    clients.append(socket.create_connection(("127.0.0.1", custom_port), 2))
+                    break
+                except ConnectionRefusedError:
+                    assert process.poll() is None, "Server exited during startup"
+                    assert time.monotonic() < deadline, "Server did not start"
+                    time.sleep(0.02)
+            clients.append(socket.create_connection(("127.0.0.1", custom_port), 2))
+            clients[0].sendall(b"GET /slow")
+            clients[1].sendall(b"GET /other HTTP/1.1\r")
+            # A mix of valid and malformed overlapping connections also checks
+            # that one client's parse error cannot affect another client's buffer.
+            for index in range(6):
+                client = socket.create_connection(("127.0.0.1", custom_port), 2)
+                clients.append(client)
+                client.sendall(b"GET / WRONG\r\n" if index % 2 else b"GET /fast HTTP/1.1\r\n")
+            for index, client in enumerate(clients[2:]):
+                check_response(read_response(client), bad_request=bool(index % 2))
+            clients[0].sendall(b" HTTP/1.1\r\n")
+            clients[1].sendall(b"\n")
+            for client in clients[:2]:
+                check_response(read_response(client), bad_request=False)
+            # The same listener must remain usable after all workers finish.
+            with socket.create_connection(("127.0.0.1", custom_port), 2) as client:
+                client.sendall(b"GET /after HTTP/1.1\r\n")
+                check_response(read_response(client), bad_request=False)
+            assert process.poll() is None, "Client errors stopped the server"
+        finally:
+            for client in clients:
+                client.close()
+            process.kill()
+            process.wait(timeout=5)
+
+
+check_concurrency()
+print("PASS: overlapping clients, two slow clients, mixed 200/400, continued service")

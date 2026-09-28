@@ -3,14 +3,14 @@
 ## Overview
 
 An incremental C++ systems programming project working toward a multithreaded
-HTTP server. The server accepts one IPv4 TCP connection, collects and parses a basic
-HTTP request line, prints its fields, sends an HTTP response, and closes both
-sockets. Stage 5 separates these responsibilities into simple C++ classes without
-changing the Stage 4 behavior. Concurrency is not yet implemented.
+HTTP server. Stage 6 continuously accepts IPv4 TCP connections and starts one
+thread per client. Each thread parses a basic HTTP request line, prints its
+fields, sends the existing HTTP response, and closes its client socket.
 
 ## Features
 
 - IPv4 TCP listener on loopback (`127.0.0.1`).
+- Concurrent clients using a detached `std::thread` for each accepted connection.
 - Default port 8080, with an optional command-line port from 1 to 65535.
 - Socket address reuse, system-call error reporting, and explicit socket cleanup.
 - Request-line collection across multiple receives, limited to 1,024 bytes.
@@ -28,40 +28,58 @@ The three classes have distinct responsibilities:
 
 | Class | Responsibility |
 | --- | --- |
-| `TcpServer` | Socket setup, one accepted connection, bounded receives, diagnostics, partial sends, and socket cleanup. |
+| `TcpServer` | Listening socket, accept loop, thread creation, per-client I/O, diagnostics, and socket cleanup. |
 | `HttpRequest` | Validate the request line and store its method, path, and version as owned strings. No socket I/O or printing. |
 | `HttpResponse` | Own the status and body and serialize the same HTTP/1.1 response bytes, including CRLF and Content-Length. No socket I/O. |
 
 ```mermaid
 flowchart LR
-    Main[main: validate port] --> Server[TcpServer: socket lifecycle]
-    Server --> Request[HttpRequest: parse fields]
-    Server --> Response[HttpResponse: build response bytes]
+    Main[main: validate port] --> Server[TcpServer: accept loop]
+    Server --> A[Client thread A]
+    Server --> B[Client thread B]
+    A --> RequestA[Own request and response]
+    B --> RequestB[Own request and response]
 ```
 
 The socket lifecycle remains visible in `src/tcp_server.cpp`:
 
 ```text
-socket → setsockopt → bind → listen → accept → recv line → parse → send → close sockets
+listener: socket → setsockopt → bind → listen → repeat accept and start thread
+worker:   recv line → parse → send response → close client socket → return
 ```
 
 `accept()` blocks until a client connects and returns a separate socket for that
-client. `TcpServer::communicate_with_client()` collects a line, calls
+client. `TcpServer::run()` passes that descriptor by value to a new thread running
+the static `handle_client()` function, then detaches it and returns to `accept()`.
+Inside the worker, `TcpServer::communicate_with_client()` collects a line, calls
 `HttpRequest::parse_request_line()`, and prints the fields. Valid input gets a
 fixed 200 OK response. `HttpResponse::serialize()` builds the status line,
 headers, computed body length, blank line, and body. `TcpServer::send_response()`
 sends that string.
 The server retries interrupted calls and loops until all response
 bytes have been sent. `MSG_NOSIGNAL` lets a failed send report an error instead
-of terminating the process with SIGPIPE. Both sockets are closed even if
-communication fails. The process returns 0 on success (including EOF before any
-data) and 1 for invalid arguments, invalid request lines, or system-call errors.
+of terminating the process with SIGPIPE. Client errors close only that connection;
+the listener keeps serving. Invalid arguments, setup errors, or fatal accept
+errors return 1. The accept loop retries EINTR.
 
-`TcpServer` stores only the port. Its `run()` function owns the local listening
-and client descriptors and explicitly closes them on the existing success and
-error paths. Helper methods borrow the client descriptor. Request and response
-objects own their strings, so their data does not depend on receive-buffer
-lifetimes. No inheritance, shared ownership, or design-pattern framework is used.
+`run()` owns the listening socket and closes it if setup or accept fails. Until
+thread creation succeeds, it also owns the accepted socket. Creation failure
+reports an error, closes that client, and continues accepting. After creation,
+the worker alone closes the client socket, including on a C++ exception. If
+detach unexpectedly fails, the accept loop joins that worker to avoid destroying
+a joinable thread; this rare fallback may wait for a slow client.
+
+Workers do not capture `this`. Their static functions need only the descriptor,
+so they do not depend on the lifetime of the `TcpServer` object. Every invocation
+has a separate stack buffer, received string, parser object, response, and send
+offset. No application receive buffer or mutable request data is shared.
+
+This stage deliberately has no thread limit, pool, queue, or idle timeout. Each
+slow client consumes a thread and descriptor; enough clients can exhaust system
+resources. The listen backlog of 16 is a pending-connection queue, not a worker
+limit. Console output from different workers may interleave. Detached workers
+are not joined at process shutdown; Ctrl+C stops the process immediately and
+the OS reclaims descriptors. Graceful shutdown remains a later stage.
 
 TCP is a byte stream: one `recv()` need not contain everything the client sent.
 The server appends exactly the received byte count until a newline arrives,
@@ -69,7 +87,7 @@ then requires CRLF and parses only the first line. Collection stops at 1,024
 bytes (including CRLF); an unfinished line at that limit is rejected. EOF after
 partial input is reported as incomplete. Malformed, incomplete, or overlong
 lines get a 400 Bad Request response when the client can still receive data.
-These rejected requests retain exit status 1 after the reply and socket cleanup.
+Rejected requests close their client socket after the reply without stopping the server.
 
 The supported format is `METHOD /path HTTP/1.1\r\n` (also HTTP/1.0), with exactly
 one space between fields. Method tokens are checked syntactically; parsing a
@@ -91,6 +109,7 @@ data while it closes may cause a TCP reset because unread data can remain.
 C++17, CMake, TCP/IP, POSIX sockets, file descriptors, network byte order,
 blocking system calls, byte streams, partial sends, HTTP request-line syntax,
 status lines, response headers, body lengths, basic classes and encapsulation,
+`std::thread`, per-client ownership,
 and basic error handling.
 Python 3 is used only for tests.
 
@@ -101,7 +120,7 @@ Python 3 is used only for tests.
 - `include/http_request.h`, `src/http_request.cpp`: request-line parsing and fields.
 - `include/http_response.h`, `src/http_response.cpp`: HTTP response construction.
 - `tests/tcp_smoke.py`: real-process TCP checks using Python's standard library.
-- `CMakeLists.txt`: executable, compiler warnings, and optional CTest integration.
+- `CMakeLists.txt`: executable, Threads::Threads linkage, warnings, and CTest integration.
 - `AGENTS.md`: permanent development rules.
 - `ROADMAP.md`: stage scope and completion status.
 
@@ -117,7 +136,7 @@ sudo apt-get install build-essential cmake python3
 ```
 
 On Alpine Linux, run `apk add --no-cache build-base cmake python3` as root.
-Stages 1 through 5 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
+Stages 1 through 6 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
 CMake 3.31.7, and Python 3.12.14.
 
 On this Windows development machine, enter the installed Linux environment:
@@ -147,10 +166,9 @@ cmake --build build
 ./build/http_server 9090
 ```
 
-The listener is local-only. It waits for one connection, then reads until a line
-ending, EOF, or the size limit. After parsing and replying (or reporting invalid
-input), it closes the connection and exits. Restart it for another connection.
-There is no idle timeout: a client can stall by leaving a partial line open.
+The listener is local-only and runs until stopped with Ctrl+C. Each client gets
+one request and response, then its socket closes; the listener remains open.
+A partial line blocks only that client's thread, not the accept loop.
 
 ## Usage
 
@@ -188,10 +206,10 @@ python3 -c 'import socket; s = socket.create_connection(("127.0.0.1", 8080)); s.
 
 The Python client prints the HTTP response and reads until EOF. A client that
 closes its sending side without sending data gets no reply; the server reports
-the disconnect and exits successfully.
+the disconnect and closes only that client's socket.
 
 Alternatively, use `curl -i --max-time 3 http://127.0.0.1:8080/` when available.
-Restart the server before every request. To try a malformed line:
+The same server can handle repeated and overlapping clients. To try a malformed line:
 
 ```sh
 printf 'GET / WRONG\r\n' | nc -w 2 127.0.0.1 8080
@@ -216,15 +234,29 @@ python3 tests/tcp_smoke.py ./build/http_server
 
 Tests require port 8080 to be free. They verify the default and custom ports,
 parsed fields, 200/400 status lines, exact headers, CRLF blank-line separation,
-Content-Length against received body bytes, exact bodies, clean EOF, process
-exit status, immediate
+Content-Length against received body bytes, exact bodies, clean EOF, startup
+exit status, continued service after client completion/errors, immediate
 restart, invalid arguments, occupied ports, valid paths and versions, fragmented
 lines (including split CRLF), the exact size limit, ignored trailing headers,
 malformed lines (including embedded NUL), incomplete and overlong input,
-EOF without data, and connection resets. Partial sends and
+EOF without data, and connection resets. The previous cases remain, with
+per-client process-exit assertions replaced by continued-service checks and
+explicit test-process cleanup. A concurrency test leaves two request lines
+incomplete while six other clients get mixed 200/400 responses; then both slow
+clients finish successfully and a fresh connection still works. This fails for
+a sequential server without relying on throughput measurements. Partial sends and
 interrupted system calls are handled in code but not deterministically forced
 by these integration tests. Validation results are recorded
 in [ROADMAP.md](ROADMAP.md). No performance claims are made.
+
+For a manual overlapping-client check with the server running, start this in one
+Linux terminal, then run a normal netcat request in another before the delay ends:
+
+```sh
+{ printf 'GET /slow'; sleep 5; printf ' HTTP/1.1\r\n'; } | nc -w 8 127.0.0.1 8080
+```
+
+The normal client should finish while the slow client's line remains incomplete.
 
 ## Roadmap
 
@@ -242,3 +274,5 @@ mean that a complete HTTP request has been read or handled. Explain how a status
 line, headers, CRLF blank line, and a byte-counted body form an HTTP response.
 Explain how separating socket I/O from parsing and serialization keeps each
 class focused while preserving the observable behavior of the server.
+Explain why a blocked client no longer stalls acceptance, how each worker owns
+its resources, and why unbounded thread creation motivates the next stage.

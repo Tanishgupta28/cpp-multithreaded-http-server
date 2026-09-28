@@ -12,6 +12,8 @@ add_executable(http_server
     src/http_response.cpp
 )
 target_include_directories(http_server PRIVATE include)
+find_package(Threads REQUIRED)
+target_link_libraries(http_server PRIVATE Threads::Threads)
 target_compile_features(http_server PRIVATE cxx_std_17)
 set_target_properties(http_server PROPERTIES CXX_EXTENSIONS OFF)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

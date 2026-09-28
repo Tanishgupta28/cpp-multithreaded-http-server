@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <iostream>
 #include <string>
+#include <thread>
+#include <system_error>
 
 namespace {
 bool close_socket(int socket_fd) {
@@ -25,7 +27,7 @@ bool close_socket(int socket_fd) {
 TcpServer::TcpServer(int port) : port_(port) {}
 
 bool TcpServer::send_response(int client_socket, std::string_view status,
-                              std::string_view body) const {
+                              std::string_view body) {
     const HttpResponse http_response(status, body);
     const std::string response = http_response.serialize();
 
@@ -52,7 +54,7 @@ bool TcpServer::send_response(int client_socket, std::string_view status,
     return true;
 }
 
-bool TcpServer::communicate_with_client(int client_socket) const {
+bool TcpServer::communicate_with_client(int client_socket) {
     constexpr std::size_t max_request_line_bytes = 1024;
     char buffer[max_request_line_bytes];
     std::string received;
@@ -102,6 +104,20 @@ bool TcpServer::communicate_with_client(int client_socket) const {
     return send_response(client_socket, "200 OK", "Hello from C++ HTTP server!\n");
 }
 
+void TcpServer::handle_client(int client_socket) {
+    // This worker owns the accepted descriptor, even if request handling throws.
+    try {
+        communicate_with_client(client_socket);
+    } catch (const std::exception& error) {
+        std::cerr << "Client handling failed: " << error.what() << '\n';
+    } catch (...) {
+        std::cerr << "Client handling failed: unknown exception.\n";
+    }
+    if (close_socket(client_socket)) {
+        std::cout << "Client socket closed." << std::endl;
+    }
+}
+
 int TcpServer::run() const {
     const int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == -1) {
@@ -130,33 +146,42 @@ int TcpServer::run() const {
         close_socket(server_socket);
         return 1;
     }
-    if (listen(server_socket, 1) == -1) {
+    if (listen(server_socket, 16) == -1) {
         std::perror("listen");
         close_socket(server_socket);
         return 1;
     }
     std::cout << "Listening on 127.0.0.1:" << port_
-              << " (one connection, then exit)" << std::endl;
+              << " (thread per client; stop with Ctrl+C)" << std::endl;
 
-    // accept() creates a client socket; the listening socket stays separate.
-    int client_socket;
-    do {
-        client_socket = accept(server_socket, nullptr, nullptr);
-    } while (client_socket == -1 && errno == EINTR);
+    while (true) {
+        // accept() creates a client socket; the listening socket stays separate.
+        const int client_socket = accept(server_socket, nullptr, nullptr);
+        if (client_socket == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::perror("accept");
+            close_socket(server_socket);
+            return 1;
+        }
+        std::cout << "Client connected." << std::endl;
 
-    if (client_socket == -1) {
-        std::perror("accept");
-        close_socket(server_socket);
-        return 1;
+        std::thread worker;
+        try {
+            // Pass the descriptor by value; no worker depends on this object's lifetime.
+            worker = std::thread(&TcpServer::handle_client, client_socket);
+        } catch (const std::exception& error) {
+            std::cerr << "Thread creation failed: " << error.what() << '\n';
+            close_socket(client_socket);
+            continue;
+        }
+        try {
+            worker.detach();
+        } catch (const std::system_error& error) {
+            // A started worker still owns the socket. Join if detach unexpectedly fails.
+            std::cerr << "Thread detach failed: " << error.what() << '\n';
+            worker.join();
+        }
     }
-    std::cout << "Client connected." << std::endl;
-
-    const bool communication_succeeded = communicate_with_client(client_socket);
-    const bool client_closed = close_socket(client_socket);
-    const bool server_closed = close_socket(server_socket);
-    if (!communication_succeeded || !client_closed || !server_closed) {
-        return 1;
-    }
-    std::cout << "Sockets closed. Server exiting.\n";
-    return 0;
 }

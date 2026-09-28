@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 5 complete. Stopped; awaiting authorization for Stage 6.**
+Current stage: **Stage 6 complete. Stopped; awaiting authorization for Stage 7.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -10,7 +10,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 3 | Parse basic HTTP requests | Complete |
 | 4 | Generate valid HTTP responses | Complete |
 | 5 | Refactor into clean C++ classes | Complete |
-| 6 | Handle multiple clients concurrently | Upcoming |
+| 6 | Handle multiple clients concurrently | Complete |
 | 7 | Implement a fixed-size thread pool | Upcoming |
 | 8 | Implement a thread-safe task queue using std::mutex and std::condition_variable | Upcoming |
 | 9 | HTTP routing, including GET / and GET /health | Upcoming |
@@ -135,3 +135,35 @@ If synchronization fails, record it here and preserve the local history.
   method-specific behavior, routing, static files, concurrency, pool, caching,
   or persistent connections. Unread trailing data can still cause a TCP reset.
   Rare syscall failures and partial-send/EINTR paths were not fault-injected.
+
+## Stage 6 validation — 2026-09-28
+
+- `TcpServer::run()` keeps accepting and creates one detached `std::thread` per
+  client. Each worker receives its descriptor by value, handles one request,
+  and closes it. Static worker functions do not capture the server object.
+  Receive buffers, request/response objects, and send offsets are per-client.
+- Thread creation failure closes the unassigned client socket and continues.
+  Worker exceptions are caught before client cleanup. An unexpected detach
+  failure joins the already-started worker. Backlog is 16; no worker limit.
+- CMake links Threads::Threads. `main.cpp`, `HttpRequest`, and `HttpResponse`
+  remain unchanged; no thread pool or queue was introduced.
+- Same Alpine WSL2 toolchain. `cmake -S . -B build` and
+  `cmake --build build --clean-first`: passed without warnings.
+- `ctest --test-dir build --output-on-failure -V`: 1/1 test passed with all prior
+  request/response, argument, port, EOF, reset, and restart cases retained.
+  Per-client exit checks now verify worker completion and a live listener;
+  test processes are explicitly stopped after validation.
+- Added overlap validation: two incomplete requests stay open while six other
+  clients receive mixed 200/400 responses; both slow clients subsequently get
+  200 and a new client still succeeds. This demonstrates actual concurrency,
+  not just sequential requests to a persistent listener.
+- Manual netcat check: fast client returned 200 while another request remained
+  incomplete; the slow client later returned 200. A subsequent malformed request
+  returned 400 and the server stayed running. Test server was stopped afterward.
+- Assumptions/limits: detached threads, unbounded thread count, no idle timeout,
+  potentially interleaved console output, and no graceful shutdown. Ctrl+C or a
+  fatal accept error ends the process without waiting for workers; the OS
+  reclaims remaining sockets. A rare detach failure can block the accept loop
+  while joining. Thread creation/detach failures, worker exceptions, and partial
+  sends/EINTR were reviewed but not fault-injected. Existing HTTP limitations
+  remain; no routing, files, caching, persistent connections, or body handling.
