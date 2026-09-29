@@ -133,7 +133,7 @@ with socket.socket() as temporary:
 check_connection(executable, custom_port, [str(custom_port)])
 check_connection(executable, custom_port, [str(custom_port)])
 print("PASS: custom port and immediate restart")
-for path, version in ((b"/index.html", b"HTTP/1.1"), (b"/", b"HTTP/1.0"),
+for path, version in ((b"/missing.html", b"HTTP/1.1"), (b"/", b"HTTP/1.0"),
                       (b"/search?q=test", b"HTTP/1.1"),
                       (b"/" + b"x" * 1008, b"HTTP/1.1")):
     message = b"GET " + path + b" " + version + b"\r\n"

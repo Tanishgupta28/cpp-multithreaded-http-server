@@ -1,12 +1,14 @@
 #include "http_response.h"
 
-HttpResponse::HttpResponse(std::string_view status, std::string_view body)
-    : status_(status), body_(body) {}
+HttpResponse::HttpResponse(std::string_view status, std::string_view body,
+                           std::string_view content_type)
+    : status_(status), body_(body), content_type_(content_type) {}
 
 std::string HttpResponse::serialize() const {
     std::string response = "HTTP/1.1 ";
     response += status_;
-    response += "\r\nContent-Type: text/plain\r\nContent-Length: ";
+    response += "\r\nContent-Type: " + content_type_;
+    response += "\r\nContent-Length: ";
     // Content-Length counts body bytes, including its final newline.
     response += std::to_string(body_.size());
     response += "\r\nConnection: close\r\n\r\n";

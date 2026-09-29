@@ -3,7 +3,7 @@
 ## Overview
 
 An incremental C++ systems programming project working toward a multithreaded
-HTTP server. Stage 9 adds method/path routing while retaining one accepting
+HTTP server. Stage 10 adds static files to method/path routing while retaining one accepting
 producer, a synchronized FIFO of client sockets, and four reusable worker consumers. Each worker takes a queued socket,
 parses a basic request line, routes it to a plain-text response, closes the client
 socket, and waits for another task.
@@ -17,7 +17,8 @@ socket, and waits for another task.
 - Socket address reuse, system-call error reporting, and explicit socket cleanup.
 - Request-line collection across multiple receives, limited to 1,024 bytes.
 - Basic method, path, and HTTP version extraction with malformed-input checks.
-- Built-in GET home and health routes; 404 for unmatched method/path pairs.
+- Built-in GET home and health routes, plus files from `public/`.
+- Binary-safe file reads, simple MIME types, and traversal/symlink rejection.
 - HTTP/1.1 200 OK, 400 Bad Request, and 404 Not Found with plain-text bodies.
 - CRLF response formatting, computed Content-Length, and Connection: close.
 - Partial-send and interrupted-call handling.
@@ -34,7 +35,8 @@ The classes have distinct responsibilities:
 | `TcpServer` | Listening socket, producer accept loop, fixed worker startup/join, client I/O, and socket cleanup. |
 | `ClientTaskQueue` | FIFO socket handoff, protected queue state, sleeping consumers, and internal queue closure. |
 | `HttpRequest` | Validate the request line and store its method, path, and version as owned strings. No socket I/O or printing. |
-| `HttpRouter` | Map a parsed method/path pair to a response without socket I/O or mutable state. |
+| `HttpRouter` | Select built-in responses or delegate GET file requests to StaticFiles. |
+| `StaticFiles` | Validate filenames, open regular files under public, read bytes, and choose Content-Type. |
 | `HttpResponse` | Own the status and body and serialize the same HTTP/1.1 response bytes, including CRLF and Content-Length. No socket I/O. |
 
 ```mermaid
@@ -121,15 +123,16 @@ and `*` are outside this stage's supported subset.
 
 Routing selects a response using the parsed method and path. A **route** is a
 recognized pair; its **handler** is the small branch that constructs its response.
-`HttpRouter::route()` uses direct comparisons, appropriate for two built-in routes:
+`HttpRouter::route()` checks the two built-ins first, then delegates other GET paths:
 
 | Method | Path | Status | Body (including newline) |
 | --- | --- | --- | --- |
 | GET | / | 200 OK | `Hello from C++ HTTP server!\n` |
 | GET | /health | 200 OK | `OK\n` |
-| Any unmatched pair | Any | 404 Not Found | `Not Found\n` |
+| GET | /filename | 200 if a readable regular file exists | File bytes |
+| Unsupported method or missing/unsafe file | Any | 404 Not Found | `Not Found\n` |
 
-**404 Not Found** means there is no matching route. Unsupported methods also
+**404 Not Found** means there is no matching built-in route or accessible static file. Unsupported methods also
 use this fallback; no POST/body handling or HEAD semantics are implemented.
 Matching is case-sensitive and exact: `/health/`, `/Health`, and
 `/health?check=1` do not match `/health`. Query strings are not stripped.
@@ -140,7 +143,37 @@ and sends the returned `HttpResponse` using the existing partial-send loop.
 Routes are fixed in code; there is no mutable routing table or additional lock.
 Request/response objects remain local to each client. Networking stays in
 `TcpServer`; parsing, routing, and serialization have separate responsibilities.
-This stage serves no files, including `/index.html` (which now returns 404).
+### Static files
+
+A **static file** is returned as stored, without generating its contents.
+The **document root** is `public/` relative to the server's working directory.
+Run from the project root, or provide a `public/` directory in the chosen working
+directory. No new command-line option is required. Built-ins `/` and `/health`
+take precedence; other GET paths delegate to `StaticFiles`.
+
+`/index.html` maps to `public/index.html`, `/style.css` to `public/style.css`,
+and `/hello.txt` to `public/hello.txt`. Only single-level filenames are supported.
+A **MIME type**, sent as Content-Type, tells clients how to interpret the bytes:
+`.html` uses `text/html`, `.css` uses `text/css`, `.txt` uses `text/plain`, and
+other extensions use `application/octet-stream`. Extension matching is case-sensitive.
+
+**Directory traversal** attempts to escape the document root using path elements
+such as `..`. The helper rejects dot-prefixed names, `..`, additional slashes,
+backslashes, percent escapes, query strings, and fragments. It opens `public`
+as a directory without following symlinks, then uses `openat` relative to that
+open descriptor with `O_NOFOLLOW`. This avoids a check-then-open symlink race.
+Only regular files pass `fstat`; nonblocking open prevents FIFO requests hanging.
+Missing, unsafe, inaccessible, nonregular, or unreadable resources return 404.
+Descriptors close through a small local RAII owner, including exception paths.
+
+Reads append the actual byte count, not a null-terminated string. Embedded NULs
+and arbitrary binary bytes are preserved; Content-Length uses the final body size.
+Each request opens and reads the file independently into local memory; no cache
+or filesystem state is shared between workers. Files are read fully into memory,
+so keep this learning server's public resources small. Concurrent file edits are
+not snapshot-isolated. The document root is operator-controlled: do not place
+sensitive files or hard links there. Subdirectories, URI decoding, streaming,
+range requests, file-size limits, and directory listings are not implemented.
 
 Responses use HTTP/1.1 even when the parsed request line says HTTP/1.0.
 
@@ -164,7 +197,10 @@ Python 3 is used only for tests.
 - `src/main.cpp`: port validation and server startup.
 - `include/tcp_server.h`, `src/tcp_server.cpp`: socket lifecycle and client I/O.
 - `include/http_request.h`, `src/http_request.cpp`: request-line parsing and fields.
-- `include/http_router.h`, `src/http_router.cpp`: stateless built-in route lookup.
+- `include/http_router.h`, `src/http_router.cpp`: built-in and static route selection.
+- `include/static_files.h`, `src/static_files.cpp`: safe file lookup and reading.
+- `public/`: example HTML, CSS, and text resources.
+- `tests/static_files.py`: isolated file, traversal, binary, and concurrency tests.
 - `include/http_response.h`, `src/http_response.cpp`: HTTP response construction.
 - `include/client_task_queue.h`, `src/client_task_queue.cpp`: synchronized FIFO.
 - `tests/client_task_queue_test.cpp`: FIFO, wakeup, and closure checks.
@@ -185,7 +221,7 @@ sudo apt-get install build-essential cmake python3
 ```
 
 On Alpine Linux, run `apk add --no-cache build-base cmake python3` as root.
-Stages 1 through 9 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
+Stages 1 through 10 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
 CMake 3.31.7, and Python 3.12.14.
 
 On this Windows development machine, enter the installed Linux environment:
@@ -210,6 +246,7 @@ cmake --build build
 ## Run
 
 ```sh
+# Run from the project root so public/ is available.
 ./build/http_server
 # Optional custom port:
 ./build/http_server 9090
@@ -278,6 +315,14 @@ printf 'GET /missing HTTP/1.1\r\n' | nc -w 2 127.0.0.1 8080
 These return 200 with `OK\n` (3 bytes), and 404 with `Not Found\n`
 (10 bytes), respectively. The existing home body is 28 bytes.
 
+To fetch example files:
+
+```sh
+printf 'GET /index.html HTTP/1.1\r\n' | nc -w 2 127.0.0.1 8080
+printf 'GET /style.css HTTP/1.1\r\n' | nc -w 2 127.0.0.1 8080
+printf 'GET /hello.txt HTTP/1.1\r\n' | nc -w 2 127.0.0.1 8080
+```
+
 ## Testing
 
 With Python 3 available at CMake configuration time:
@@ -290,7 +335,8 @@ Or run the checks directly:
 
 ```sh
 ./build/client_task_queue_test
-python3 tests/tcp_smoke.py ./build/http_server
+python3 tests/tcp_smoke.py # Run from the project root so public/ is available.
+./build/http_server
 ```
 
 Integration tests require Linux `/proc` (including readable worker `wchan` files)
@@ -334,6 +380,11 @@ Linux terminal, then run a normal netcat request in another before the delay end
 
 With only one slow client, the normal client should finish before it. With four
 such slow clients, later clients are accepted and queued until a worker is free.
+
+Static-file tests use a temporary document root and verify exact example bytes,
+MIME types, empty files, a 20,480-byte binary body, rejected traversal and symlinks,
+nonregular resources, missing roots, and 42 requests through 12 concurrent clients.
+They also confirm file edits are visible without restarting.
 
 ## Roadmap
 

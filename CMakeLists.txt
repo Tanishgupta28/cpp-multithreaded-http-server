@@ -10,6 +10,7 @@ add_executable(http_server
     src/tcp_server.cpp
     src/client_task_queue.cpp
     src/http_request.cpp
+    src/static_files.cpp
     src/http_router.cpp
     src/http_response.cpp
 )
@@ -39,6 +40,11 @@ if(BUILD_TESTING)
         add_test(NAME tcp_smoke
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tcp_smoke.py
                     $<TARGET_FILE:http_server>)
-        set_tests_properties(tcp_smoke PROPERTIES TIMEOUT 20)
+        add_test(NAME static_files
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/static_files.py
+                    $<TARGET_FILE:http_server>)
+        set_tests_properties(static_files PROPERTIES TIMEOUT 20)
+        set_tests_properties(tcp_smoke PROPERTIES TIMEOUT 20
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     endif()
 endif()

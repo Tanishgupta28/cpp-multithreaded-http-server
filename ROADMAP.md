@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 9 complete. Stopped; awaiting authorization for Stage 10.**
+Current stage: **Stage 10 complete. Stopped; awaiting authorization for Stage 11.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -14,7 +14,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 7 | Implement a fixed-size thread pool | Complete |
 | 8 | Implement a thread-safe task queue using std::mutex and std::condition_variable | Complete |
 | 9 | HTTP routing, including GET / and GET /health | Complete |
-| 10 | Serve static files | Upcoming |
+| 10 | Serve static files | Complete |
 | 11 | LRU cache using unordered_map and a doubly linked list, average O(1) lookup/update | Upcoming |
 | 12 | Graceful shutdown, logging, improved error handling | Upcoming |
 | 13 | Testing and basic load/performance testing | Upcoming |
@@ -264,3 +264,31 @@ If synchronization fails, record it here and preserve the local history.
 - Limits: no static files (Stage 10), HEAD semantics, POST/body handling, URI
   decoding, persistent connections, timeouts, cache, or graceful shutdown.
   Existing unbounded queue and slow-client limitations remain.
+
+## Stage 10 validation - 2026-09-29
+
+- Added `StaticFiles`, called by HttpRouter after the unchanged GET / and
+  GET /health built-ins. Single-level GET filenames map to public/ relative to
+  the process working directory. Added index.html, style.css, and hello.txt.
+- HttpResponse accepts a Content-Type (text/plain by default). HTML, CSS, text,
+  and fallback application/octet-stream responses retain CRLF, byte-counted
+  Content-Length, and Connection: close. Socket/queue/worker code is unchanged.
+- Filename checks reject traversal, extra separators, dot-prefixed names,
+  percent escapes, queries, and fragments. openat anchors file lookup to an
+  opened public directory; O_NOFOLLOW rejects root/file symlinks. fstat permits
+  regular files only; nonblocking open avoids FIFO hangs. Local RAII closes fds.
+- Same Alpine WSL2 toolchain: clean CMake build passed without warnings;
+  `ctest --test-dir build --output-on-failure -V`: 3/3 suites passed.
+  Prior smoke/queue/concurrency tests remain; the previous missing index.html
+  case now uses missing.html because index.html is an implemented resource.
+- New tests verify exact HTML/CSS/text bytes, MIME, lengths, a 20,480-byte binary
+  body with NULs, empty files, missing files/root, symlink rejection, directories,
+  FIFOs, and traversal variants. 42 mixed requests through 12 concurrent clients
+  passed. File changes are visible on the next request; no cache was added.
+- Manual netcat checks: HTML 200 (300 bytes), CSS 200 (116), text 200 (26),
+  and /../README.md 404. The validation server was stopped afterward.
+- Assumptions/limits: operator-controlled public directory in working directory;
+  no nested paths or decoding. Files are read fully into local memory and should
+  remain small; no size limit or snapshot guarantee during concurrent edits.
+  No caching, ranges, streaming, new shutdown mechanism, or other future features.
+  Existing pool/queue limitations remain. Unsupported methods still return 404.
