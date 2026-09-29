@@ -10,6 +10,7 @@ add_executable(http_server
     src/tcp_server.cpp
     src/client_task_queue.cpp
     src/http_request.cpp
+    src/http_router.cpp
     src/http_response.cpp
 )
 target_include_directories(http_server PRIVATE include)

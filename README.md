@@ -3,9 +3,9 @@
 ## Overview
 
 An incremental C++ systems programming project working toward a multithreaded
-HTTP server. Stage 8 uses one accepting producer, a synchronized FIFO of client
-sockets, and four reusable worker consumers. Each worker takes a queued socket,
-parses a basic request line, sends the existing HTTP response, closes the client
+HTTP server. Stage 9 adds method/path routing while retaining one accepting
+producer, a synchronized FIFO of client sockets, and four reusable worker consumers. Each worker takes a queued socket,
+parses a basic request line, routes it to a plain-text response, closes the client
 socket, and waits for another task.
 
 ## Features
@@ -17,7 +17,8 @@ socket, and waits for another task.
 - Socket address reuse, system-call error reporting, and explicit socket cleanup.
 - Request-line collection across multiple receives, limited to 1,024 bytes.
 - Basic method, path, and HTTP version extraction with malformed-input checks.
-- HTTP/1.1 200 OK and 400 Bad Request responses with plain-text bodies.
+- Built-in GET home and health routes; 404 for unmatched method/path pairs.
+- HTTP/1.1 200 OK, 400 Bad Request, and 404 Not Found with plain-text bodies.
 - CRLF response formatting, computed Content-Length, and Connection: close.
 - Partial-send and interrupted-call handling.
 - Orderly client disconnect handling and connection-reset error reporting.
@@ -33,6 +34,7 @@ The classes have distinct responsibilities:
 | `TcpServer` | Listening socket, producer accept loop, fixed worker startup/join, client I/O, and socket cleanup. |
 | `ClientTaskQueue` | FIFO socket handoff, protected queue state, sleeping consumers, and internal queue closure. |
 | `HttpRequest` | Validate the request line and store its method, path, and version as owned strings. No socket I/O or printing. |
+| `HttpRouter` | Map a parsed method/path pair to a response without socket I/O or mutable state. |
 | `HttpResponse` | Own the status and body and serialize the same HTTP/1.1 response bytes, including CRLF and Content-Length. No socket I/O. |
 
 ```mermaid
@@ -48,7 +50,7 @@ The socket lifecycle remains visible in `src/tcp_server.cpp`:
 
 ```text
 producer: accept -> queue.push -> notify_one -> repeat
-consumer: queue.pop/wait -> recv -> parse -> send -> close client -> repeat
+consumer: queue.pop/wait -> recv -> parse -> route -> send -> close client -> repeat
 ```
 
 The **producer** is the thread running `TcpServer::run()`. It alone calls
@@ -115,8 +117,31 @@ only visible ASCII characters. Queries remain part of the printed path; URI
 decoding and full URI validation are not implemented. Absolute-form targets
 and `*` are outside this stage's supported subset.
 
-All syntactically valid lines receive the same response regardless of path.
-There is no routing or method-specific behavior (including POST or HEAD).
+### Routing
+
+Routing selects a response using the parsed method and path. A **route** is a
+recognized pair; its **handler** is the small branch that constructs its response.
+`HttpRouter::route()` uses direct comparisons, appropriate for two built-in routes:
+
+| Method | Path | Status | Body (including newline) |
+| --- | --- | --- | --- |
+| GET | / | 200 OK | `Hello from C++ HTTP server!\n` |
+| GET | /health | 200 OK | `OK\n` |
+| Any unmatched pair | Any | 404 Not Found | `Not Found\n` |
+
+**404 Not Found** means there is no matching route. Unsupported methods also
+use this fallback; no POST/body handling or HEAD semantics are implemented.
+Matching is case-sensitive and exact: `/health/`, `/Health`, and
+`/health?check=1` do not match `/health`. Query strings are not stripped.
+Malformed request lines are rejected before routing with 400 Bad Request.
+
+The worker parses an `HttpRequest`, passes it to a local, stateless `HttpRouter`,
+and sends the returned `HttpResponse` using the existing partial-send loop.
+Routes are fixed in code; there is no mutable routing table or additional lock.
+Request/response objects remain local to each client. Networking stays in
+`TcpServer`; parsing, routing, and serialization have separate responsibilities.
+This stage serves no files, including `/index.html` (which now returns 404).
+
 Responses use HTTP/1.1 even when the parsed request line says HTTP/1.0.
 
 Headers or body bytes already received after the first line are ignored.
@@ -127,7 +152,8 @@ data while it closes may cause a TCP reset because unread data can remain.
 
 C++17, CMake, TCP/IP, POSIX sockets, file descriptors, network byte order,
 blocking system calls, byte streams, partial sends, HTTP request-line syntax,
-status lines, response headers, body lengths, basic classes and encapsulation,
+status lines, response headers, body lengths, exact method/path routing,
+basic classes and encapsulation,
 `std::thread`, a fixed worker pool, `std::queue`, `std::mutex`,
 `std::condition_variable`, producer-consumer coordination, per-client ownership,
 and basic error handling.
@@ -138,6 +164,7 @@ Python 3 is used only for tests.
 - `src/main.cpp`: port validation and server startup.
 - `include/tcp_server.h`, `src/tcp_server.cpp`: socket lifecycle and client I/O.
 - `include/http_request.h`, `src/http_request.cpp`: request-line parsing and fields.
+- `include/http_router.h`, `src/http_router.cpp`: stateless built-in route lookup.
 - `include/http_response.h`, `src/http_response.cpp`: HTTP response construction.
 - `include/client_task_queue.h`, `src/client_task_queue.cpp`: synchronized FIFO.
 - `tests/client_task_queue_test.cpp`: FIFO, wakeup, and closure checks.
@@ -158,7 +185,7 @@ sudo apt-get install build-essential cmake python3
 ```
 
 On Alpine Linux, run `apk add --no-cache build-base cmake python3` as root.
-Stages 1 through 8 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
+Stages 1 through 9 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
 CMake 3.31.7, and Python 3.12.14.
 
 On this Windows development machine, enter the installed Linux environment:
@@ -198,7 +225,7 @@ four are occupied; accepted clients wait in the application queue.
 In another terminal in the same Linux environment:
 
 ```sh
-printf 'GET /index.html HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -w 2 127.0.0.1 8080
+printf 'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -w 2 127.0.0.1 8080
 ```
 
 The client receives the following response. Header lines use CRLF on the wire;
@@ -217,7 +244,7 @@ The server prints:
 
 ```text
 Method: GET
-Path: /index.html
+Path: /
 Version: HTTP/1.1
 ```
 
@@ -241,6 +268,16 @@ printf 'GET / WRONG\r\n' | nc -w 2 127.0.0.1 8080
 This receives `HTTP/1.1 400 Bad Request`, the same content type and connection
 headers, `Content-Length: 12`, and the body `Bad Request\n`.
 
+Try the other route and the fallback:
+
+```sh
+printf 'GET /health HTTP/1.1\r\n' | nc -w 2 127.0.0.1 8080
+printf 'GET /missing HTTP/1.1\r\n' | nc -w 2 127.0.0.1 8080
+```
+
+These return 200 with `OK\n` (3 bytes), and 404 with `Not Found\n`
+(10 bytes), respectively. The existing home body is 28 bytes.
+
 ## Testing
 
 With Python 3 available at CMake configuration time:
@@ -258,7 +295,7 @@ python3 tests/tcp_smoke.py ./build/http_server
 
 Integration tests require Linux `/proc` (including readable worker `wchan` files)
 and port 8080 to be free. They verify the default and custom ports,
-parsed fields, 200/400 status lines, exact headers, CRLF blank-line separation,
+parsed fields, 200/400/404 status lines, exact headers, CRLF blank-line separation,
 Content-Length against received body bytes, exact bodies, clean EOF, startup
 exit status, continued service after client completion/errors, immediate
 restart, invalid arguments, occupied ports, valid paths and versions, fragmented
@@ -267,7 +304,7 @@ malformed lines (including embedded NUL), incomplete and overlong input,
 EOF without data, and connection resets. The previous cases remain, with
 per-client process-exit assertions replaced by continued-service checks and
 explicit test-process cleanup. A concurrency test leaves two request lines
-incomplete while six other clients get mixed 200/400 responses; then both slow
+incomplete while six other clients get mixed 200/400/404 responses; then both slow
 clients finish successfully and a fresh connection still works. This fails for
 a sequential server without relying on throughput measurements.
 
@@ -279,8 +316,8 @@ clients. The thread-ID set stays unchanged through completion of all 12 clients.
 The test also verifies that all 12 sockets are accepted, so eight really wait in
 the application queue rather than the kernel backlog. Idle checks observe workers
 sleeping in futex waits and allow at most two total CPU ticks over 200 ms. Three
-additional waves of 32 mixed valid/malformed requests verify repeated wakeups,
-worker reuse, and correct responses. These are correctness checks, not benchmarks.
+additional waves of 32 mixed home, health, missing, unsupported-method, and
+malformed requests verify repeated wakeups, worker reuse, and correct responses. These are correctness checks, not benchmarks.
 The C++ queue test covers FIFO order, wait/push wakeup, rejection after closure,
 draining queued work, repeated closure, and waking an empty consumer on closure.
 Previous tests are retained. Partial sends and
@@ -292,7 +329,7 @@ For a manual overlapping-client check with the server running, start this in one
 Linux terminal, then run a normal netcat request in another before the delay ends:
 
 ```sh
-{ printf 'GET /slow'; sleep 5; printf ' HTTP/1.1\r\n'; } | nc -w 8 127.0.0.1 8080
+{ printf 'GET /'; sleep 5; printf ' HTTP/1.1\r\n'; } | nc -w 8 127.0.0.1 8080
 ```
 
 With only one slow client, the normal client should finish before it. With four
@@ -317,3 +354,6 @@ class focused while preserving the observable behavior of the server.
 Explain how fixed workers are reused, why four slow clients saturate this pool,
 how the application FIFO separates acceptance from execution, why the wait
 predicate matters, and why the critical section excludes client processing.
+
+Explain how a route maps method/path to a handler, why unknown pairs return
+404, and why immutable routing needs no synchronization beyond the client queue.

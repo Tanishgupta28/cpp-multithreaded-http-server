@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 8 complete. Stopped; awaiting authorization for Stage 9.**
+Current stage: **Stage 9 complete. Stopped; awaiting authorization for Stage 10.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -13,7 +13,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 6 | Handle multiple clients concurrently | Complete |
 | 7 | Implement a fixed-size thread pool | Complete |
 | 8 | Implement a thread-safe task queue using std::mutex and std::condition_variable | Complete |
-| 9 | HTTP routing, including GET / and GET /health | Upcoming |
+| 9 | HTTP routing, including GET / and GET /health | Complete |
 | 10 | Serve static files | Upcoming |
 | 11 | LRU cache using unordered_map and a doubly linked list, average O(1) lookup/update | Upcoming |
 | 12 | Graceful shutdown, logging, improved error handling | Upcoming |
@@ -236,3 +236,31 @@ If synchronization fails, record it here and preserve the local history.
   logging, routing, files, cache, persistent HTTP, or advanced parsing added.
   Startup/allocation failures and rare syscall failures remain reviewed rather
   than fault-injected. Linux /proc idle checks require readable wchan files.
+
+## Stage 9 validation - 2026-09-29
+
+- Added stateless `HttpRouter` with exact, case-sensitive method/path comparisons.
+  GET / retains the 28-byte home body; GET /health returns `OK\n` (3 bytes).
+  Unmatched pairs, including unsupported methods, return 404 with `Not Found\n`
+  (10 bytes). Malformed/incomplete/overlong lines still return 400 before routing.
+- `TcpServer` passes a parsed `HttpRequest` to the router, then serializes and
+  sends its returned `HttpResponse`. Main, the four-worker pool, producer-consumer
+  queue, mutex/predicate wait, ownership, and local buffers remain unchanged.
+- Same Alpine WSL2 toolchain. `cmake -S . -B build` and
+  `cmake --build build --clean-first` passed without warnings.
+- `ctest --test-dir build --output-on-failure -V`: 2/2 passed. Previous parser,
+  socket/error, FIFO, worker sleep/wakeup, and reuse scenarios remain covered;
+  earlier arbitrary-path 200 expectations now correctly expect 404.
+- Added exact route/body/header/Content-Length checks, unsupported-method and
+  case/trailing-slash/query checks. Overlapping mixed-route clients complete
+  while two slow clients wait. Three waves of 32 mixed 200/400/404 requests
+  passed with the same four worker IDs. Existing 12-client application queue
+  saturation/drain test also passed. These are correctness checks, not metrics.
+- Manual netcat requests on port 19090 verified home 200, health 200, unknown
+  path 404, malformed line 400, and POST /health fallback 404. Server stopped
+  after validation.
+- Assumptions: unmatched method/path pairs uniformly return 404; query strings
+  remain part of the exact path. No mutable routing state or route-table lock.
+- Limits: no static files (Stage 10), HEAD semantics, POST/body handling, URI
+  decoding, persistent connections, timeouts, cache, or graceful shutdown.
+  Existing unbounded queue and slow-client limitations remain.

@@ -2,6 +2,7 @@
 #include "client_task_queue.h"
 #include "http_request.h"
 #include "http_response.h"
+#include "http_router.h"
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -27,9 +28,7 @@ bool close_socket(int socket_fd) {
 
 TcpServer::TcpServer(int port) : port_(port) {}
 
-bool TcpServer::send_response(int client_socket, std::string_view status,
-                              std::string_view body) {
-    const HttpResponse http_response(status, body);
+bool TcpServer::send_response(int client_socket, const HttpResponse& http_response) {
     const std::string response = http_response.serialize();
 
     std::size_t bytes_sent = 0;
@@ -76,7 +75,7 @@ bool TcpServer::communicate_with_client(int client_socket) {
                 return true;
             }
             std::cerr << "Incomplete request line: client closed before CRLF.\n";
-            send_response(client_socket, "400 Bad Request", "Bad Request\n");
+            send_response(client_socket, HttpResponse("400 Bad Request", "Bad Request\n"));
             return false;
         }
         // recv() supplies a byte count, not a null-terminated string or a full line.
@@ -87,22 +86,21 @@ bool TcpServer::communicate_with_client(int client_socket) {
             if (newline == 0 || received[newline - 1] != '\r'
                 || !request.parse_request_line(std::string_view(received.data(), newline - 1))) {
                 std::cerr << "Malformed request line.\n";
-                send_response(client_socket, "400 Bad Request", "Bad Request\n");
+                send_response(client_socket, HttpResponse("400 Bad Request", "Bad Request\n"));
                 return false;
             }
             std::cout << "Method: " << request.method() << '\n'
                       << "Path: " << request.path() << '\n'
                       << "Version: " << request.version() << '\n';
-            break;
+            const HttpRouter router;
+            return send_response(client_socket, router.route(request));
         }
         if (received.size() == max_request_line_bytes) {
             std::cerr << "Request line too long: limit is 1024 bytes including CRLF.\n";
-            send_response(client_socket, "400 Bad Request", "Bad Request\n");
+            send_response(client_socket, HttpResponse("400 Bad Request", "Bad Request\n"));
             return false;
         }
     }
-
-    return send_response(client_socket, "200 OK", "Hello from C++ HTTP server!\n");
 }
 
 void TcpServer::handle_client(int client_socket) {

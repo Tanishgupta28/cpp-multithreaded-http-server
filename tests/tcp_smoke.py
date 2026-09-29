@@ -11,12 +11,13 @@ import tempfile
 from pathlib import Path
 
 
-def check_response(response, bad_request):
+def check_response(response, bad_request=False, status=b"200 OK",
+                   expected_body=b"Hello from C++ HTTP server!\n"):
     headers, separator, body = response.partition(b"\r\n\r\n")
     assert separator == b"\r\n\r\n", response
     lines = headers.split(b"\r\n")
-    status = b"400 Bad Request" if bad_request else b"200 OK"
-    expected_body = b"Bad Request\n" if bad_request else b"Hello from C++ HTTP server!\n"
+    if bad_request:
+        status, expected_body = b"400 Bad Request", b"Bad Request\n"
     assert lines[0] == b"HTTP/1.1 " + status, lines[0]
     assert len(lines) == 4, lines
     assert lines[1] == b"Content-Type: text/plain", lines
@@ -27,7 +28,8 @@ def check_response(response, bad_request):
 
 def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
                      reset=False, error=None, fields=(b"GET", b"/", b"HTTP/1.1"),
-                     fragments=None):
+                     fragments=None, status=b"200 OK",
+                     expected_body=b"Hello from C++ HTTP server!\n"):
     output_file = tempfile.TemporaryFile()
     error_file = tempfile.TemporaryFile()
     process = subprocess.Popen(
@@ -63,7 +65,8 @@ def check_connection(executable, port, arguments, message=b"GET / HTTP/1.1\r\n",
                         break
                     response += chunk
                 if message:
-                    check_response(response, bad_request=bool(error))
+                    check_response(response, bad_request=bool(error),
+                                   status=status, expected_body=expected_body)
                 else:
                     assert response == b"", response
         deadline = time.monotonic() + 5
@@ -135,8 +138,31 @@ for path, version in ((b"/index.html", b"HTTP/1.1"), (b"/", b"HTTP/1.0"),
                       (b"/" + b"x" * 1008, b"HTTP/1.1")):
     message = b"GET " + path + b" " + version + b"\r\n"
     check_connection(executable, custom_port, [str(custom_port)], message,
-                     fields=(b"GET", path, version))
+                     fields=(b"GET", path, version),
+                     status=b"200 OK" if path == b"/" else b"404 Not Found",
+                     expected_body=b"Hello from C++ HTTP server!\n" if path == b"/" else b"Not Found\n")
 print("PASS: paths, HTTP/1.0 and HTTP/1.1, exact 1024-byte line")
+# Explicit cases keep expected responses independent of the router implementation.
+route_cases = [
+    (b"GET / HTTP/1.1\r\n", b"200 OK", b"Hello from C++ HTTP server!\n"),
+    (b"GET /health HTTP/1.1\r\n", b"200 OK", b"OK\n"),
+    (b"GET /missing HTTP/1.1\r\n", b"404 Not Found", b"Not Found\n"),
+    (b"POST /health HTTP/1.1\r\n", b"404 Not Found", b"Not Found\n"),
+    (b"GET / WRONG\r\n", b"400 Bad Request", b"Bad Request\n"),
+]
+for message, status, body in route_cases[:4]:
+    check_connection(executable, custom_port, [str(custom_port)], message,
+                     fields=tuple(message.strip().split(b" ")), status=status,
+                     expected_body=body)
+for method, path in ((b"get", b"/"), (b"GET", b"/Health"),
+                     (b"GET", b"/health/"), (b"GET", b"/health?check=1"),
+                     (b"PUT", b"/missing")):
+    check_connection(executable, custom_port, [str(custom_port)],
+                     method + b" " + path + b" HTTP/1.1\r\n",
+                     fields=(method, path, b"HTTP/1.1"),
+                     status=b"404 Not Found", expected_body=b"Not Found\n")
+print("PASS: home, health, missing routes, unsupported methods and exact matching")
+
 check_connection(executable, custom_port, [str(custom_port)],
                  b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
 check_connection(executable, custom_port, [str(custom_port)],
@@ -188,23 +214,24 @@ def check_concurrency():
                     assert time.monotonic() < deadline, "Server did not start"
                     time.sleep(0.02)
             clients.append(socket.create_connection(("127.0.0.1", custom_port), 2))
-            clients[0].sendall(b"GET /slow")
-            clients[1].sendall(b"GET /other HTTP/1.1\r")
+            clients[0].sendall(b"GET /")
+            clients[1].sendall(b"GET / HTTP/1.1\r")
             # A mix of valid and malformed overlapping connections also checks
             # that one client's parse error cannot affect another client's buffer.
             for index in range(6):
                 client = socket.create_connection(("127.0.0.1", custom_port), 2)
                 clients.append(client)
-                client.sendall(b"GET / WRONG\r\n" if index % 2 else b"GET /fast HTTP/1.1\r\n")
+                client.sendall(route_cases[index % len(route_cases)][0])
             for index, client in enumerate(clients[2:]):
-                check_response(read_response(client), bad_request=bool(index % 2))
+                _, status, body = route_cases[index % len(route_cases)]
+                check_response(read_response(client), status=status, expected_body=body)
             clients[0].sendall(b" HTTP/1.1\r\n")
             clients[1].sendall(b"\n")
             for client in clients[:2]:
                 check_response(read_response(client), bad_request=False)
             # The same listener must remain usable after all workers finish.
             with socket.create_connection(("127.0.0.1", custom_port), 2) as client:
-                client.sendall(b"GET /after HTTP/1.1\r\n")
+                client.sendall(b"GET / HTTP/1.1\r\n")
                 check_response(read_response(client), bad_request=False)
             assert process.poll() is None, "Client errors stopped the server"
         finally:
@@ -215,7 +242,7 @@ def check_concurrency():
 
 
 check_concurrency()
-print("PASS: overlapping clients, two slow clients, mixed 200/400, continued service")
+print("PASS: overlapping clients, two slow clients, mixed routes and 200/400/404, continued service")
 
 
 def check_fixed_pool():
@@ -262,7 +289,7 @@ def check_fixed_pool():
             for index in range(4):
                 client = socket.create_connection(("127.0.0.1", custom_port), 2)
                 clients.append(client)
-                client.sendall(b"GET /slow")
+                client.sendall(b"GET /")
                 wait_for_log(b"Client connected.", index + 1)
             assert thread_ids() == original_threads
 
@@ -270,7 +297,7 @@ def check_fixed_pool():
             for index in range(8):
                 client = socket.create_connection(("127.0.0.1", custom_port), 2)
                 clients.append(client)
-                client.sendall(b"GET /queued HTTP/1.1\r\n")
+                client.sendall(b"GET / HTTP/1.1\r\n")
                 assert thread_ids() == original_threads
             wait_for_log(b"Client connected.", 12)
             # The server now owns 12 accepted sockets plus its listener. Stage 7
@@ -300,10 +327,10 @@ def check_fixed_pool():
                     client = socket.create_connection(("127.0.0.1", custom_port), 2)
                     clients.append(client)
                     wave_clients.append(client)
-                    client.sendall(b"GET / WRONG\r\n" if index % 3 == 0
-                                   else b"GET /stress HTTP/1.1\r\n")
+                    client.sendall(route_cases[index % len(route_cases)][0])
                 for index, client in enumerate(wave_clients):
-                    check_response(read_response(client), bad_request=(index % 3 == 0))
+                    _, status, body = route_cases[index % len(route_cases)]
+                    check_response(read_response(client), status=status, expected_body=body)
                     client.close()
                 assert thread_ids() == original_threads
                 check_idle_workers(original_threads)
