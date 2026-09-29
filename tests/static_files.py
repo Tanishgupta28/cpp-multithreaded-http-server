@@ -76,15 +76,44 @@ with tempfile.TemporaryDirectory() as temporary:
                 futures = [clients.submit(check, *case) for case in cases * 6]
                 for future in futures:
                     future.result()
-            # Every request reopens the file; no caching is introduced.
+            # A hit preserves cached bytes even if the file changes on disk.
+            # All five resources fit, so concurrent requests above are also hits.
             (public / "hello.txt").write_bytes(b"Updated\n")
+            check(b"/hello.txt", b"200 OK", cases[4][2])
+            # Missing files are not cached.
+            check(b"/new.txt", b"404 Not Found", b"Not Found\n")
+            (public / "new.txt").write_bytes(b"New\n")
+            check(b"/new.txt", b"200 OK", b"New\n")
+            # Fill with 16 different files to evict all original entries.
+            for index in range(16):
+                name = f"fill{index}.txt"
+                (public / name).write_bytes(b"Fill\n")
+                check(("/" + name).encode(), b"200 OK", b"Fill\n")
             check(b"/hello.txt", b"200 OK", b"Updated\n")
+            # More distinct files than capacity exercise concurrent misses/evictions.
+            mixed = []
+            for index in range(24):
+                name = f"mixed{index}.bin"
+                body = bytes([index, 0, 255]) * 100
+                (public / name).write_bytes(body)
+                mixed.append((("/" + name).encode(), b"200 OK", body,
+                              b"application/octet-stream"))
+            mixed.extend([
+                (b"/absent.txt", b"404 Not Found", b"Not Found\n", b"text/plain"),
+                (b"/../secret.txt", b"404 Not Found", b"Not Found\n", b"text/plain"),
+            ])
+            with concurrent.futures.ThreadPoolExecutor(max_workers=12) as clients:
+                futures = [clients.submit(check, *case) for case in mixed * 2]
+                for future in futures:
+                    future.result()
+            # Use an uncached resource for missing-root/symlink checks.
+            (public / "uncached.txt").write_bytes(b"Uncached\n")
             public.rename(root / "saved-public")
-            check(b"/hello.txt", b"404 Not Found", b"Not Found\n")
+            check(b"/uncached.txt", b"404 Not Found", b"Not Found\n")
             public.symlink_to(root / "saved-public", target_is_directory=True)
-            check(b"/hello.txt", b"404 Not Found", b"Not Found\n")
+            check(b"/uncached.txt", b"404 Not Found", b"Not Found\n")
             assert process.poll() is None
         finally:
             process.kill()
             process.wait(timeout=5)
-print("PASS: static MIME/bytes, binary/empty files, traversal/symlinks, 42 concurrent requests, missing root")
+print("PASS: static MIME/bytes, binary/empty files, traversal/symlinks, 94 concurrent requests, cache hits/eviction, missing root")

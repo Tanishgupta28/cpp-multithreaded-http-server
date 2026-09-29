@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 10 complete. Stopped; awaiting authorization for Stage 11.**
+Current stage: **Stage 11 complete. Stopped; awaiting authorization for Stage 12.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -15,7 +15,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 8 | Implement a thread-safe task queue using std::mutex and std::condition_variable | Complete |
 | 9 | HTTP routing, including GET / and GET /health | Complete |
 | 10 | Serve static files | Complete |
-| 11 | LRU cache using unordered_map and a doubly linked list, average O(1) lookup/update | Upcoming |
+| 11 | LRU cache using unordered_map and a doubly linked list, average O(1) lookup/update | Complete |
 | 12 | Graceful shutdown, logging, improved error handling | Upcoming |
 | 13 | Testing and basic load/performance testing | Upcoming |
 | 14 | Final cleanup, documentation, architecture explanation, GitHub polishing | Upcoming |
@@ -292,3 +292,36 @@ If synchronization fails, record it here and preserve the local history.
   remain small; no size limit or snapshot guarantee during concurrent edits.
   No caching, ranges, streaming, new shutdown mechanism, or other future features.
   Existing pool/queue limitations remain. Unsupported methods still return 404.
+
+## Stage 11 validation - 2026-09-29
+
+- Added LRUCache: unordered_map from filename to list iterator, with MRU at the
+  front and LRU at the back. get promotes hits; put inserts/updates at the front
+  and evicts the back above capacity. Average O(1) entry bookkeeping; filename
+  hashing and response body copying still depend on key/body length.
+- StaticFiles shares one process-local cache of 16 successful file reads, storing
+  immutable body bytes and Content-Type. Filename validation precedes lookup;
+  misses use the unchanged safe openat/read path. Errors are not cached.
+- A dedicated mutex protects map/list lookup, promotion, update, and eviction.
+  Shared immutable ownership preserves hit data across concurrent eviction.
+  File I/O, HTTP construction/serialization, and socket I/O occur outside this
+  lock. The client queue mutex and fixed four-worker architecture are unchanged.
+- Clean CMake build passed without warnings on the existing Alpine WSL2 toolchain.
+  All 4 CTest suites passed: LRU, client queue, TCP/HTTP, and static files.
+- Focused LRU tests cover misses, hits, MRU promotion, updates, LRU eviction,
+  capacities 0/1/3, repeated access, binary/MIME preservation, ownership after
+  eviction, and four concurrent threads performing 4,000 put/get iterations.
+- Static tests preserve HTTP bytes, MIME, Content-Length, and safety checks.
+  94 concurrent integration requests include 24 distinct binary files exceeding
+  capacity plus mixed built-in/missing/traversal requests. Existing worker count,
+  queue saturation, sleep/wakeup, and reuse checks also pass.
+- Stage 10 immediate-file-update expectations now reflect deliberate caching:
+  edits stay invisible on hits, then appear after eviction. Missing files become
+  available immediately when created. Missing-root checks use uncached names.
+- Manual netcat validation on port 19090: initial file 200, unchanged cached
+  200/body/length after an on-disk edit, and traversal 404. Test server stopped.
+- Assumptions/limits: fixed working directory/root; capacity counts entries, not
+  bytes. Active responses can retain evicted bytes. Concurrent misses may read
+  the same file more than once. No invalidation/TTL: edits, removals, replacements,
+  and document-root changes do not affect hits until eviction or restart.
+  No measured performance claims or Stage 12 shutdown/logging work introduced.

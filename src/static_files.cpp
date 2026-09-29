@@ -1,4 +1,6 @@
 #include "static_files.h"
+#include "lru_cache.h"
+#include <utility>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -37,6 +39,13 @@ HttpResponse StaticFiles::serve(std::string_view path) const {
     if (name.front() == '.' || name.find("..") != std::string::npos
         || name.find_first_of("/\\%?#") != std::string::npos) return not_found;
 
+    // Function-local static initialization is thread-safe in C++11 and later.
+    // All short-lived StaticFiles helpers share this process-wide cache.
+    static LRUCache cache(16);
+    if (const auto cached = cache.get(name)) {
+        return HttpResponse("200 OK", cached->body, cached->content_type);
+    }
+
     const FileDescriptor root(open("public", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     if (root.get() < 0) return not_found;
     // openat anchors the lookup to the opened directory. O_NOFOLLOW rejects
@@ -58,5 +67,8 @@ HttpResponse StaticFiles::serve(std::string_view path) const {
         if (count == 0) break;
         body.append(buffer, static_cast<std::size_t>(count));
     }
-    return HttpResponse("200 OK", body, content_type(name));
+    const auto file_data = std::make_shared<const CachedFile>(
+        CachedFile{std::move(body), std::string(content_type(name))});
+    cache.put(name, file_data);
+    return HttpResponse("200 OK", file_data->body, file_data->content_type);
 }

@@ -3,9 +3,10 @@
 ## Overview
 
 An incremental C++ systems programming project working toward a multithreaded
-HTTP server. Stage 10 adds static files to method/path routing while retaining one accepting
-producer, a synchronized FIFO of client sockets, and four reusable worker consumers. Each worker takes a queued socket,
-parses a basic request line, routes it to a plain-text response, closes the client
+HTTP server. Stage 11 caches static files behind method/path routing while
+retaining one accepting producer, a synchronized FIFO of client sockets, and four
+reusable worker consumers. Each worker takes a queued socket, parses a basic
+request line, routes it to an HTTP response, closes the client
 socket, and waits for another task.
 
 ## Features
@@ -19,6 +20,7 @@ socket, and waits for another task.
 - Basic method, path, and HTTP version extraction with malformed-input checks.
 - Built-in GET home and health routes, plus files from `public/`.
 - Binary-safe file reads, simple MIME types, and traversal/symlink rejection.
+- Shared, mutex-protected LRU cache holding up to 16 static files.
 - HTTP/1.1 200 OK, 400 Bad Request, and 404 Not Found with plain-text bodies.
 - CRLF response formatting, computed Content-Length, and Connection: close.
 - Partial-send and interrupted-call handling.
@@ -36,7 +38,8 @@ The classes have distinct responsibilities:
 | `ClientTaskQueue` | FIFO socket handoff, protected queue state, sleeping consumers, and internal queue closure. |
 | `HttpRequest` | Validate the request line and store its method, path, and version as owned strings. No socket I/O or printing. |
 | `HttpRouter` | Select built-in responses or delegate GET file requests to StaticFiles. |
-| `StaticFiles` | Validate filenames, open regular files under public, read bytes, and choose Content-Type. |
+| `StaticFiles` | Validate filenames, consult the cache, safely read misses, and choose Content-Type. |
+| `LRUCache` | Store immutable file data and maintain bounded recency order under its own mutex. |
 | `HttpResponse` | Own the status and body and serialize the same HTTP/1.1 response bytes, including CRLF and Content-Length. No socket I/O. |
 
 ```mermaid
@@ -168,8 +171,8 @@ Descriptors close through a small local RAII owner, including exception paths.
 
 Reads append the actual byte count, not a null-terminated string. Embedded NULs
 and arbitrary binary bytes are preserved; Content-Length uses the final body size.
-Each request opens and reads the file independently into local memory; no cache
-or filesystem state is shared between workers. Files are read fully into memory,
+Cache misses open and read files into local memory; cache hits reuse previously
+loaded bytes. Files are read fully into memory,
 so keep this learning server's public resources small. Concurrent file edits are
 not snapshot-isolated. The document root is operator-controlled: do not place
 sensitive files or hard links there. Subdirectories, URI decoding, streaming,
@@ -181,6 +184,53 @@ Headers or body bytes already received after the first line are ignored.
 The server does not wait for or consume a complete HTTP request. Sending further
 data while it closes may cause a TCP reset because unread data can remain.
 
+### LRU static-file cache
+
+A **cache** retains file contents in memory for reuse. A **hit** finds a stored
+file; a **miss** reads it from disk and inserts it. **Capacity** is 16 entries
+(not bytes), fixed in `StaticFiles::serve()`. Only successful regular-file reads
+are cached; built-in routes, unsafe paths, and missing/unreadable files are not.
+Filename validation runs before every cache lookup. Misses retain all Stage 10
+`openat`, symlink, and regular-file checks.
+
+**LRU** means least recently used. When inserting beyond capacity, **eviction**
+removes the file that was used longest ago. `std::unordered_map` maps filenames
+to list iterators for average constant-time lookup. `std::list` is a doubly
+linked list: its front is most recently used (MRU), and its back is least
+recently used (LRU). `splice` moves an existing node to the front without walking
+the list. The map supplies fast access; the list supplies fast ordering/removal.
+For capacity 3, shown **LRU to MRU**: A B C; access A -> B C A;
+insert D -> C A D (B is evicted). Updating an existing key also promotes it.
+
+One function-local static `LRUCache` is shared by all workers and initialized
+once by C++'s thread-safe static initialization. Its dedicated mutex protects
+map lookup, list promotion, insertion/update, and eviction as one critical
+section. It is independent of the client-queue mutex. No disk reads, response
+construction, serialization, recv, or send occur while holding the cache lock.
+Concurrent misses for the same filename may read it independently; insert/update
+still leaves exactly one entry. No request coalescing is implemented.
+
+Entries contain body bytes and Content-Type through `shared_ptr<const CachedFile>`.
+A hit copies this small ownership handle under the lock. Immutable bytes stay
+alive for the worker even if another worker evicts the entry. This avoids copying
+a file under the lock or exposing a dangling reference. New file data is built
+outside the lock. Insertion rolls back its new list node if map allocation fails.
+
+Map/list bookkeeping averages O(1) per lookup, insertion, update, and eviction
+with respect to entry count. Hashing/copying a filename depends on its length;
+file reads, body copying into HttpResponse, and serialization depend on byte
+count. Capacity bounds retained entries, not total bytes; active workers can
+retain evicted data temporarily. This is an algorithmic property, not a measured
+performance claim.
+
+There is no TTL or file-change invalidation. Edited, removed, or replaced files
+may keep returning their previously safe bytes until eviction or process restart.
+Even removing/replacing the public directory does not invalidate existing hits;
+uncached paths still undergo the original safety checks. The working directory
+and document root should remain fixed during a run. Concurrent edits during a
+miss are not snapshot-isolated. Keep resources small and restart to reliably
+refresh them during development.
+
 ## Technologies / Concepts
 
 C++17, CMake, TCP/IP, POSIX sockets, file descriptors, network byte order,
@@ -189,7 +239,7 @@ status lines, response headers, body lengths, exact method/path routing,
 basic classes and encapsulation,
 `std::thread`, a fixed worker pool, `std::queue`, `std::mutex`,
 `std::condition_variable`, producer-consumer coordination, per-client ownership,
-and basic error handling.
+LRU caching with `std::unordered_map` and `std::list`, and basic error handling.
 Python 3 is used only for tests.
 
 ## Project Structure
@@ -199,6 +249,8 @@ Python 3 is used only for tests.
 - `include/http_request.h`, `src/http_request.cpp`: request-line parsing and fields.
 - `include/http_router.h`, `src/http_router.cpp`: built-in and static route selection.
 - `include/static_files.h`, `src/static_files.cpp`: safe file lookup and reading.
+- `include/lru_cache.h`, `src/lru_cache.cpp`: synchronized file cache.
+- `tests/lru_cache_test.cpp`: recency, capacity, ownership, and concurrency checks.
 - `public/`: example HTML, CSS, and text resources.
 - `tests/static_files.py`: isolated file, traversal, binary, and concurrency tests.
 - `include/http_response.h`, `src/http_response.cpp`: HTTP response construction.
@@ -221,7 +273,7 @@ sudo apt-get install build-essential cmake python3
 ```
 
 On Alpine Linux, run `apk add --no-cache build-base cmake python3` as root.
-Stages 1 through 10 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
+Stages 1 through 11 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
 CMake 3.31.7, and Python 3.12.14.
 
 On this Windows development machine, enter the installed Linux environment:
@@ -334,9 +386,10 @@ ctest --test-dir build --output-on-failure
 Or run the checks directly:
 
 ```sh
+./build/lru_cache_test
 ./build/client_task_queue_test
-python3 tests/tcp_smoke.py # Run from the project root so public/ is available.
-./build/http_server
+python3 tests/tcp_smoke.py ./build/http_server
+python3 tests/static_files.py ./build/http_server
 ```
 
 Integration tests require Linux `/proc` (including readable worker `wchan` files)
@@ -383,8 +436,14 @@ such slow clients, later clients are accepted and queued until a worker is free.
 
 Static-file tests use a temporary document root and verify exact example bytes,
 MIME types, empty files, a 20,480-byte binary body, rejected traversal and symlinks,
-nonregular resources, missing roots, and 42 requests through 12 concurrent clients.
-They also confirm file edits are visible without restarting.
+nonregular resources, missing roots, and 94 requests through 12 concurrent clients,
+including 24 distinct binary files that exceed cache capacity.
+They also confirm hits retain cached bytes after a file edit, misses are not
+negatively cached, and edited bytes appear after eviction.
+
+The LRU unit test covers miss/hit, promotion, replacement, eviction, capacities
+0/1/3, repeated hits, binary/MIME data, retained ownership after eviction, and
+four threads running 4,000 combined put/get iterations.
 
 ## Roadmap
 

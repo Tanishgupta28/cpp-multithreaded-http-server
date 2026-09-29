@@ -10,6 +10,7 @@ add_executable(http_server
     src/tcp_server.cpp
     src/client_task_queue.cpp
     src/http_request.cpp
+    src/lru_cache.cpp
     src/static_files.cpp
     src/http_router.cpp
     src/http_response.cpp
@@ -25,6 +26,16 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(lru_cache_test tests/lru_cache_test.cpp src/lru_cache.cpp)
+    target_include_directories(lru_cache_test PRIVATE include)
+    target_compile_features(lru_cache_test PRIVATE cxx_std_17)
+    set_target_properties(lru_cache_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(lru_cache_test PRIVATE Threads::Threads)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(lru_cache_test PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME lru_cache COMMAND lru_cache_test)
+    set_tests_properties(lru_cache PROPERTIES TIMEOUT 10)
     add_executable(client_task_queue_test tests/client_task_queue_test.cpp src/client_task_queue.cpp)
     target_include_directories(client_task_queue_test PRIVATE include)
     target_compile_features(client_task_queue_test PRIVATE cxx_std_17)
