@@ -3,7 +3,7 @@
 ## Overview
 
 An incremental C++ systems programming project working toward a multithreaded
-HTTP server. Stage 11 caches static files behind method/path routing while
+HTTP server. Stage 12 adds graceful SIGINT shutdown and synchronized logging while
 retaining one accepting producer, a synchronized FIFO of client sockets, and four
 reusable worker consumers. Each worker takes a queued socket, parses a basic
 request line, routes it to an HTTP response, closes the client
@@ -21,6 +21,8 @@ socket, and waits for another task.
 - Built-in GET home and health routes, plus files from `public/`.
 - Binary-safe file reads, simple MIME types, and traversal/symlink rejection.
 - Shared, mutex-protected LRU cache holding up to 16 static files.
+- SIGINT shutdown that closes the listener, drains accepted work, and joins workers.
+- Synchronized INFO/ERROR logging with separate queue, cache, and logging mutexes.
 - HTTP/1.1 200 OK, 400 Bad Request, and 404 Not Found with plain-text bodies.
 - CRLF response formatting, computed Content-Length, and Connection: close.
 - Partial-send and interrupted-call handling.
@@ -39,6 +41,8 @@ The classes have distinct responsibilities:
 | `HttpRequest` | Validate the request line and store its method, path, and version as owned strings. No socket I/O or printing. |
 | `HttpRouter` | Select built-in responses or delegate GET file requests to StaticFiles. |
 | `StaticFiles` | Validate filenames, consult the cache, safely read misses, and choose Content-Type. |
+| `ShutdownSignal` | Install SIGINT notification through a self-pipe; restore handler and close pipe after workers join. |
+| `Logger` (namespace) | Write complete INFO/ERROR log lines under a dedicated mutex. |
 | `LRUCache` | Store immutable file data and maintain bounded recency order under its own mutex. |
 | `HttpResponse` | Own the status and body and serialize the same HTTP/1.1 response bytes, including CRLF and Content-Length. No socket I/O. |
 
@@ -61,8 +65,8 @@ consumer: queue.pop/wait -> recv -> parse -> route -> send -> close client -> re
 The **producer** is the thread running `TcpServer::run()`. It alone calls
 `accept()` and pushes each accepted socket into `ClientTaskQueue`. The four
 **consumers** call `pop()` and process one client at a time. No new thread is
-created for a client. `main.cpp`, request parsing, and HTTP response generation
-remain unchanged.
+created for a client. `main.cpp` validates the port and reports fatal startup
+errors; parsing and HTTP response generation retain their existing behavior.
 
 The shared task container is `std::queue<int>`. A **mutex** protects both that
 FIFO and its `closed_` flag. The exact **critical sections** are checking closure
@@ -84,14 +88,12 @@ that socket. `run()` owns the listener and joins workers before the queue goes
 out of scope. Buffers, request and response objects, and send offsets are local
 to each client handler; workers do not share application receive data.
 
-`ClientTaskQueue::close()` is internal error cleanup, not a user-facing shutdown
-feature. It rejects further pushes and wakes all waiting consumers. Already
-queued tasks are drained; `pop()` returns false once closed and empty. On partial
-pool startup failure, nothing has been accepted yet, so closing the empty queue
-lets created workers return and be joined. On accept/enqueue failure, the
-producer closes the listener, closes the queue, joins workers, and returns 1.
-Active or queued slow clients can delay this cleanup indefinitely. The queue
-must be drained by consumers before destruction; it does not itself close sockets.
+`ClientTaskQueue::close()` supports both shutdown and fatal-error cleanup. It
+rejects pushes and wakes all consumers with `notify_all()`. Already queued tasks
+are drained; `pop()` returns false once closed and empty. Partial worker startup
+failure closes the empty queue and joins any workers that started. The producer
+owns the listener and closes it before closing the queue and joining workers.
+The queue does not close descriptors itself: consumers close accepted sockets.
 
 **Stage 7 versus Stage 8:** previously each worker called `accept()`, leaving
 connections in the kernel backlog when all four were busy. Now the producer
@@ -104,8 +106,8 @@ timeout, or queue-capacity policy has been introduced.
 
 The worker count remains `worker_count = 4`. Client errors affect only their
 connection. Existing EINTR retry, partial-send handling, and MSG_NOSIGNAL are
-preserved. Console output may interleave. Ctrl+C still stops the process
-immediately and the OS reclaims sockets; no graceful shutdown framework is added.
+preserved. Log lines are synchronized. Ctrl+C now requests graceful shutdown
+as described below.
 
 TCP is a byte stream: one `recv()` need not contain everything the client sent.
 The server appends exactly the received byte count until a newline arrives,
@@ -231,6 +233,60 @@ and document root should remain fixed during a run. Concurrent edits during a
 miss are not snapshot-isolated. Keep resources small and restart to reliably
 refresh them during development.
 
+### Shutdown, logging, and error handling
+
+**Graceful shutdown** stops new work and lets accepted work finish before releasing
+resources. Ctrl+C sends **SIGINT** to the terminal's foreground process group.
+`ShutdownSignal` installs a handler that only writes a byte to a nonblocking
+self-pipe and preserves errno. It never logs, allocates, or locks a mutex. A full
+pipe already contains a notification, so repeated signals are harmless.
+
+The main accepting flow uses `poll()` on the pipe and listening socket. Pipe
+readiness takes priority: the producer logs the request, closes the listener,
+closes the task queue, and joins all four workers. Only the listener uses
+nonblocking accept to handle stale readiness (for example, a reset before accept).
+Accepted sockets retain blocking recv/send on Linux. This is not an event-driven
+client-I/O design; no epoll or additional signal thread is used. A connection
+accepted concurrently with the signal may join the drain; unaccepted backlog
+connections are not guaranteed a response.
+
+Queue closure and `notify_all()` wake idle workers. Active workers finish their
+client, then consume pending sockets until the closed queue is empty. **Joining**
+waits for each thread to finish, keeping the queue alive while workers use it.
+Workers close their own client socket exactly once. The main flow closes the
+listener; file descriptors have local RAII owners; the signal helper restores
+the previous handler and closes both pipe descriptors after workers are joined.
+Linux close calls are not retried after an error to avoid closing a reused fd.
+Successful SIGINT shutdown exits 0; fatal server failures exit 1.
+
+**Limitation:** draining has no deadline. A client stuck in recv/send, a stalled
+disk read, or blocked log output can delay shutdown indefinitely. Another SIGINT
+only repeats the notification; it does not force termination. No timeouts or
+forced client cancellation were added. SIGTERM retains its default behavior.
+
+`Logger` writes `[INFO]` lines to stdout and `[ERROR]` lines to stderr with one
+dedicated mutex. Each complete line is flushed before unlocking; timestamps are
+omitted. Logs cover startup/port, clients, parsed fields, sent response status,
+cache hits/misses, errors, and shutdown/join completion. Lines may alternate
+between clients, but individual lines cannot splice together. Separate stdout
+and stderr collectors may display a different order. No normal logging occurs
+inside the signal handler. Logging holds no queue/cache locks, and its lock
+covers only output, not disk reads or client socket I/O.
+
+Bad/malformed/disconnected clients are **client-level failures**: they receive
+400 where possible or close without a reply; the server continues. Missing,
+inaccessible, or rejected resources remain generic 404 responses. Unexpected
+file read/open/stat/close failures are logged only on the server. Cache insertion
+failure logs an error but still serves successfully read bytes. Exceptions while
+handling a client close that client's socket. HTTP responses never include OS
+error text or internal paths.
+
+**Fatal failures** include signal setup, socket/bind/listen, worker startup,
+non-retryable accept/poll, or queue insertion failure. Cleanup closes owned
+resources and joins started workers. EINTR is retried for accept/poll/recv/send
+and file open/read; transient accept EAGAIN/ECONNABORTED returns to readiness
+waiting. Queue, cache, and logging mutexes retain separate responsibilities.
+
 ## Technologies / Concepts
 
 C++17, CMake, TCP/IP, POSIX sockets, file descriptors, network byte order,
@@ -245,6 +301,9 @@ Python 3 is used only for tests.
 ## Project Structure
 
 - `src/main.cpp`: port validation and server startup.
+- `include/shutdown_signal.h`, `src/shutdown_signal.cpp`: signal-safe notification.
+- `include/logger.h`, `src/logger.cpp`: synchronized server output.
+- `tests/shutdown.py`: SIGINT, queue drain, worker joins, restart, and log checks.
 - `include/tcp_server.h`, `src/tcp_server.cpp`: socket lifecycle and client I/O.
 - `include/http_request.h`, `src/http_request.cpp`: request-line parsing and fields.
 - `include/http_router.h`, `src/http_router.cpp`: built-in and static route selection.
@@ -273,7 +332,7 @@ sudo apt-get install build-essential cmake python3
 ```
 
 On Alpine Linux, run `apk add --no-cache build-base cmake python3` as root.
-Stages 1 through 11 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
+Stages 1 through 12 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
 CMake 3.31.7, and Python 3.12.14.
 
 On this Windows development machine, enter the installed Linux environment:
@@ -332,9 +391,9 @@ Hello from C++ HTTP server!
 The server prints:
 
 ```text
-Method: GET
-Path: /
-Version: HTTP/1.1
+[INFO] Method: GET
+[INFO] Path: /
+[INFO] Version: HTTP/1.1
 ```
 
 If netcat is unavailable:
@@ -390,6 +449,7 @@ Or run the checks directly:
 ./build/client_task_queue_test
 python3 tests/tcp_smoke.py ./build/http_server
 python3 tests/static_files.py ./build/http_server
+python3 tests/shutdown.py ./build/http_server
 ```
 
 Integration tests require Linux `/proc` (including readable worker `wchan` files)
@@ -444,6 +504,13 @@ negatively cached, and edited bytes appear after eviction.
 The LRU unit test covers miss/hit, promotion, replacement, eviction, capacities
 0/1/3, repeated hits, binary/MIME data, retained ownership after eviction, and
 four threads running 4,000 combined put/get iterations.
+
+Shutdown tests send SIGINT to idle and busy servers, repeat start/stop on the
+same port, and verify all four workers stop and are joined before exit 0. Four
+partial requests hold workers while eight accepted requests queue; after SIGINT,
+new connections fail while all twelve accepted clients can complete. Repeated
+SIGINT and complete log-line/status counts are checked. Rare allocation and
+syscall failures are reviewed but not fault-injected.
 
 ## Roadmap
 

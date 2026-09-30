@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 11 complete. Stopped; awaiting authorization for Stage 12.**
+Current stage: **Stage 12 complete. Stopped; awaiting authorization for Stage 13.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -16,7 +16,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 9 | HTTP routing, including GET / and GET /health | Complete |
 | 10 | Serve static files | Complete |
 | 11 | LRU cache using unordered_map and a doubly linked list, average O(1) lookup/update | Complete |
-| 12 | Graceful shutdown, logging, improved error handling | Upcoming |
+| 12 | Graceful shutdown, logging, improved error handling | Complete |
 | 13 | Testing and basic load/performance testing | Upcoming |
 | 14 | Final cleanup, documentation, architecture explanation, GitHub polishing | Upcoming |
 
@@ -325,3 +325,35 @@ If synchronization fails, record it here and preserve the local history.
   the same file more than once. No invalidation/TTL: edits, removals, replacements,
   and document-root changes do not affect hits until eviction or restart.
   No measured performance claims or Stage 12 shutdown/logging work introduced.
+
+## Stage 12 validation - 2026-09-30
+
+- Added a small ShutdownSignal RAII helper. SIGINT only writes to a nonblocking
+  self-pipe and preserves errno; no logging, allocation, or mutex use in handler.
+  Main polls pipe/listener, prioritizes shutdown, closes listener and task queue,
+  drains accepted tasks, joins four workers, restores handler, and closes pipe.
+- Only the listening socket uses nonblocking accept to handle stale readiness;
+  client recv/send remain blocking. No epoll, extra signal thread, or client-I/O
+  redesign. Accepted sockets and all queue/cache ownership rules are preserved.
+- Logger uses a dedicated mutex for complete INFO/ERROR lines and flushes each
+  line. Startup, request fields/status, cache hit/miss, errors, shutdown, and join
+  completion are logged. Queue/cache locks are not held during log output.
+- Improved fatal startup/accept cleanup, EINTR and transient accept handling,
+  exception cleanup in accepting flow, file error reporting, open EINTR retries,
+  and cache insertion fallback. Client errors stay isolated; HTTP errors remain
+  generic 400/404. Close is not retried, avoiding reused-descriptor hazards.
+- Clean CMake build passed without warnings; all 5 CTest suites passed on the
+  existing Alpine WSL2 toolchain. Previous HTTP, reset, file/traversal, cache,
+  fixed-worker, and queue tests remain unchanged and pass.
+- New shutdown test checks idle wakeup/exit, three starts/stops on one port,
+  repeated SIGINT, four slow active clients plus eight queued requests draining,
+  refusal of new clients after closure, four worker-stop records, join completion,
+  exit 0, and complete synchronized log lines/status counts.
+- Manual PTY run served GET /health, then terminal Ctrl+C (ETX) generated SIGINT.
+  Observed listener/queue closure, four worker-stop messages, join completion,
+  and clean exit 0. The validation process was reaped.
+- Limits: no shutdown deadline or forced cancellation; stalled recv/send, disk,
+  or log output can delay draining indefinitely. Repeated SIGINT does not force
+  exit. SIGTERM retains default behavior. Uses Linux pipe2/socket flags; existing
+  Linux target remains. Rare allocation/syscall failures were reviewed, not
+  fault-injected. No Stage 13 benchmarks or unrelated features were added.

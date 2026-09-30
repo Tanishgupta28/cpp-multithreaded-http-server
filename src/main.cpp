@@ -1,4 +1,5 @@
 #include "tcp_server.h"
+#include "logger.h"
 
 #include <charconv>
 #include <iostream>
@@ -21,6 +22,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    const TcpServer server(port);
-    return server.run();
+    try {
+        const TcpServer server(port);
+        return server.run();
+    } catch (const std::exception& error) {
+        Logger::error("Fatal server startup error:");
+        Logger::error(error.what());
+        return 1;
+    }
 }

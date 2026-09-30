@@ -6,6 +6,8 @@ if(NOT UNIX)
 endif()
 
 add_executable(http_server
+    src/logger.cpp
+    src/shutdown_signal.cpp
     src/main.cpp
     src/tcp_server.cpp
     src/client_task_queue.cpp
@@ -51,6 +53,10 @@ if(BUILD_TESTING)
         add_test(NAME tcp_smoke
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tcp_smoke.py
                     $<TARGET_FILE:http_server>)
+        add_test(NAME shutdown
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/shutdown.py
+                    $<TARGET_FILE:http_server>)
+        set_tests_properties(shutdown PROPERTIES TIMEOUT 20)
         add_test(NAME static_files
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/static_files.py
                     $<TARGET_FILE:http_server>)
