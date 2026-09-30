@@ -1,6 +1,6 @@
 # Development roadmap
 
-Current stage: **Stage 12 complete. Stopped; awaiting authorization for Stage 13.**
+Current stage: **Stage 13 complete. Stopped; awaiting authorization for Stage 14.**
 Complete one stage per authorized run, then stop for explicit instruction.
 
 | Stage | Scope | Status |
@@ -17,7 +17,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 10 | Serve static files | Complete |
 | 11 | LRU cache using unordered_map and a doubly linked list, average O(1) lookup/update | Complete |
 | 12 | Graceful shutdown, logging, improved error handling | Complete |
-| 13 | Testing and basic load/performance testing | Upcoming |
+| 13 | Testing and basic load/performance testing | Complete |
 | 14 | Final cleanup, documentation, architecture explanation, GitHub polishing | Upcoming |
 
 Stage 7 introduces workers and fixed-size execution; Stage 8 introduces the reusable synchronized queue. Keep this separation explicit when designing those stages.
@@ -357,3 +357,37 @@ If synchronization fails, record it here and preserve the local history.
   exit. SIGTERM retains default behavior. Uses Linux pipe2/socket flags; existing
   Linux target remains. Rare allocation/syscall failures were reviewed, not
   fault-injected. No Stage 13 benchmarks or unrelated features were added.
+
+## Stage 13 validation - 2026-09-30
+
+- Server implementation unchanged. Added standard-library Python load generator,
+  workload runner, metric/failure/deadline checks, and short load regression CTest.
+  Earlier correctness, queue saturation/slow-client, file/traversal, cache,
+  logging, shutdown, and worker-count suites are preserved.
+- Configurable finite request count, client concurrency, numeric IPv4/port, paths,
+  and per-request deadline. Reports successful/failed responses, elapsed seconds,
+  successful requests/second, average/p50/p95 latency, and sample errors as JSON.
+  Percentiles use sorted nearest rank ceil(p*n), with all attempts included.
+- `cmake -S . -B build`, clean build, and CTest passed without warnings; 7/7 suites
+  passed. Added failure checks cover refused connections, wrong Content-Length,
+  and a peer that sends no response. Short runner checks use 24 requests per row.
+- Separate actual run: `python3 tests/benchmark.py ./build/http_server --requests
+  500`; raw output saved in benchmarks/stage13.json. Nine 500-request workloads
+  cover health, cached index.html, and five mixed routes at concurrency 1/4/12,
+  plus cold/warm single-request probes. All 4,502 requests succeeded.
+- Same Alpine WSL2/GCC 14.2.0/CMake 3.31.7/Python 3.12.14 environment, i5-1135G7,
+  eight visible logical CPUs and ~7.6 GiB visible RAM. Build type unset, no
+  optimization flag selected. Loopback client/server, logging enabled to temp file.
+- Observed health throughput: 5798.4 / 2184.8 / 1738.7 req/s at 1/4/12 clients.
+  Cached static: 4594.3 / 2060.5 / 1716.5; mixed: 4894.0 / 1951.1 / 1665.7.
+  README records full elapsed/average/p50/p95 tables from actual JSON output.
+- Cold/warm application-cache probes: 6.661 / 5.138 ms end-to-end. Single samples
+  do not establish a disk/cache speedup; OS caches were not flushed. Logs show
+  one index.html miss and 1,801 hits. No cache changes or invalidation added.
+- Thread IDs stayed at five (four workers plus main), idle fd count returned to
+  six after each workload, all client-close log records were present, and SIGINT
+  completed worker joining with exit 0 after load. No crashes/deadlocks observed.
+- Limits: short closed-loop local runs, client and server share CPU resources;
+  Python/GIL, logging, instrumentation, WSL/filesystem, and default build flags
+  influence measurements. Periodic thread sampling is not continuous monitoring.
+  No universal performance or speedup claims; no Stage 14 work started.

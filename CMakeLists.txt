@@ -53,6 +53,13 @@ if(BUILD_TESTING)
         add_test(NAME tcp_smoke
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tcp_smoke.py
                     $<TARGET_FILE:http_server>)
+        add_test(NAME load_metrics
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/load_test.py)
+        add_test(NAME load_regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/benchmark.py
+                    $<TARGET_FILE:http_server> --requests 24)
+        set_tests_properties(load_metrics PROPERTIES TIMEOUT 10)
+        set_tests_properties(load_regression PROPERTIES TIMEOUT 30)
         add_test(NAME shutdown
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/shutdown.py
                     $<TARGET_FILE:http_server>)

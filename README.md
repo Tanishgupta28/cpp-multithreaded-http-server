@@ -3,7 +3,7 @@
 ## Overview
 
 An incremental C++ systems programming project working toward a multithreaded
-HTTP server. Stage 12 adds graceful SIGINT shutdown and synchronized logging while
+HTTP server. Stage 13 adds regression and bounded load testing while
 retaining one accepting producer, a synchronized FIFO of client sockets, and four
 reusable worker consumers. Each worker takes a queued socket, parses a basic
 request line, routes it to an HTTP response, closes the client
@@ -304,6 +304,10 @@ Python 3 is used only for tests.
 - `include/shutdown_signal.h`, `src/shutdown_signal.cpp`: signal-safe notification.
 - `include/logger.h`, `src/logger.cpp`: synchronized server output.
 - `tests/shutdown.py`: SIGINT, queue drain, worker joins, restart, and log checks.
+- `tests/load.py`: configurable bounded load generator with JSON metrics.
+- `tests/benchmark.py`: reproducible workload matrix and resource/shutdown checks.
+- `tests/load_test.py`: percentile, failure reporting, and deadline checks.
+- `benchmarks/stage13.json`: actual recorded local measurement output.
 - `include/tcp_server.h`, `src/tcp_server.cpp`: socket lifecycle and client I/O.
 - `include/http_request.h`, `src/http_request.cpp`: request-line parsing and fields.
 - `include/http_router.h`, `src/http_router.cpp`: built-in and static route selection.
@@ -332,7 +336,7 @@ sudo apt-get install build-essential cmake python3
 ```
 
 On Alpine Linux, run `apk add --no-cache build-base cmake python3` as root.
-Stages 1 through 12 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
+Stages 1 through 13 were validated on Alpine Linux 3.22 under WSL2 with GCC 14.2.0,
 CMake 3.31.7, and Python 3.12.14.
 
 On this Windows development machine, enter the installed Linux environment:
@@ -482,7 +486,7 @@ draining queued work, repeated closure, and waking an empty consumer on closure.
 Previous tests are retained. Partial sends and
 interrupted system calls are handled in code but not deterministically forced
 by these integration tests. Validation results are recorded
-in [ROADMAP.md](ROADMAP.md). No performance claims are made.
+in [ROADMAP.md](ROADMAP.md). Separate measured load results appear below.
 
 For a manual overlapping-client check with the server running, start this in one
 Linux terminal, then run a normal netcat request in another before the delay ends:
@@ -511,6 +515,112 @@ partial requests hold workers while eight accepted requests queue; after SIGINT,
 new connections fail while all twelve accepted clients can complete. Repeated
 SIGINT and complete log-line/status counts are checked. Rare allocation and
 syscall failures are reviewed but not fault-injected.
+
+## Load and performance testing
+
+**Regression testing** checks that previous behavior still works after a change.
+All earlier suites remain. Two new CTest entries check load-metric arithmetic,
+failed connections/replies, request deadlines, and a small real-server run at
+concurrency 1/4/12. No test asserts a minimum throughput or maximum measured
+latency; correctness and cleanup must pass independently of machine speed.
+
+**Load testing** sends a finite workload to observe behavior under concurrent
+usage. `tests/load.py` uses only Python's standard library. **Concurrency** is
+the maximum number of client threads issuing requests; each waits for its response
+before starting its next request (closed-loop load). Each request opens a new TCP
+connection and reads until EOF. The client sends only the request line supported
+by this server; it is not a general HTTP benchmark client.
+
+With the server running from the project root, example standalone commands are:
+
+```sh
+python3 tests/load.py --host 127.0.0.1 --port 8080 --requests 500 --concurrency 1 --path /health
+python3 tests/load.py --host 127.0.0.1 --port 8080 --requests 500 --concurrency 4 --path /index.html
+python3 tests/load.py --host 127.0.0.1 --port 8080 --requests 500 --concurrency 12 --path / --path /health --path /index.html --path /style.css --path /hello.txt
+```
+
+Paths repeat round-robin by request index. The host must be a numeric IPv4 address
+so DNS cannot stall a run. Limits are 1..100,000 requests, 1..128 client threads,
+and `--timeout` (default 3 seconds, maximum 60) per connect/send/receive transaction.
+Responses over 16 MiB fail the load client's size guard. Failures are reported
+and produce exit status 1. A success requires status 200, CRLF framing, a present
+Content-Type, exact Content-Length, Connection: close, and EOF. Exact file/MIME
+contents and expected 400/404 behavior are covered by the regression suites;
+the generic load client treats any non-200 status as a failed response.
+
+**Throughput** is successful responses divided by elapsed wall-clock seconds,
+reported as requests/second. Elapsed time includes client executor startup,
+request execution/validation, and joining its threads, but excludes CLI process
+startup. **Latency** measures one attempt from before connection setup through
+response reading/validation, including network and server queueing; it excludes
+time before that client thread starts the attempt. Statistics include all attempts,
+including failures: average is the arithmetic mean, **p50** is the median-like
+50th-percentile nearest rank, and **p95** is the 95th-percentile nearest rank.
+For n sorted latencies, percentile p uses rank `ceil(p*n)` (1-based), with no
+interpolation. Thus 95% of samples are at or below the reported p95.
+
+**Saturation** occurs when work arrives faster than available workers can finish.
+Concurrency above four can create queueing but does not alone prove saturation.
+The existing slow-client test explicitly occupies all four workers and checks
+that additional accepted clients wait in the application queue. Slow/normal
+client, binary-file, eviction, and shutdown tests remain separate correctness checks.
+
+### Recorded local run (2026-09-30)
+
+Environment: Alpine Linux 3.22 under WSL2, kernel 5.15.167.4, Intel i5-1135G7
+2.40 GHz, 8 logical CPUs visible, about 7.6 GiB RAM visible, GCC 14.2.0,
+CMake 3.31.7, Python 3.12.14. CMake build type was unset (default compiler flags,
+no optimization flag selected). Client and server ran on the same WSL instance
+through loopback, with the project/public files on `/mnt/c`. Server logging stayed
+enabled and was redirected to a temporary file. No CPU pinning or OS-cache flush.
+
+Exact reproduction command from the project root after the documented build:
+
+```sh
+python3 tests/benchmark.py ./build/http_server --requests 500 > build/benchmark.json
+```
+
+This runner selects a free port, starts a fresh server, performs one initial
+/index.html request and one repeat, then runs the three workloads at each of
+1, 4, and 12 clients. It samples worker IDs during load, checks idle descriptor
+counts after each workload, verifies response/close log counts, and requests
+SIGINT shutdown. Each load subprocess has a 60-second deadline; startup/shutdown
+have five-second deadlines. Failed runs stop their helper processes.
+
+[Raw measured output](benchmarks/stage13.json) contains unrounded values and all
+parameters. Each row below used **500 requests, 500 successful, 0 failed**.
+Mixed routes are `/`, `/health`, `/index.html`, `/style.css`, and `/hello.txt`.
+
+| Workload | Clients | Elapsed s | Successful req/s | Average ms | p50 ms | p95 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| /health | 1 | 0.086 | 5798.4 | 0.171 | 0.151 | 0.236 |
+| /index.html (cached) | 1 | 0.109 | 4594.3 | 0.216 | 0.190 | 0.306 |
+| Mixed (five routes) | 1 | 0.102 | 4894.0 | 0.203 | 0.173 | 0.248 |
+| /health | 4 | 0.229 | 2184.8 | 1.810 | 1.773 | 2.589 |
+| /index.html (cached) | 4 | 0.243 | 2060.5 | 1.914 | 1.847 | 2.634 |
+| Mixed (five routes) | 4 | 0.256 | 1951.1 | 2.028 | 1.960 | 3.044 |
+| /health | 12 | 0.288 | 1738.7 | 6.684 | 6.490 | 9.869 |
+| /index.html (cached) | 12 | 0.291 | 1716.5 | 6.783 | 6.617 | 9.802 |
+| Mixed (five routes) | 12 | 0.300 | 1665.7 | 7.042 | 6.769 | 10.753 |
+
+The initial application-cache miss took 6.661 ms end-to-end; the immediate hit
+took 5.138 ms. These are single samples from separate load-client processes,
+including client initialization effects; they do not establish a speedup.
+The OS filesystem cache was not cleared. Logs verified **one index.html miss
+and 1,801 hits** across the run; a cache hit is not itself a throughput metric.
+
+All **4,502 requests succeeded**. Observed thread IDs remained unchanged (main
+plus four workers); idle descriptors returned to **six** after each workload.
+All client-close records were present, logs had complete lines, all workers joined,
+and SIGINT exit status was **0**. Descriptor checks concern process resources,
+not TCP TIME_WAIT entries. Thread observations are periodic samples.
+
+Higher concurrency reduced throughput and raised latency in this run. Python
+client scheduling/GIL, logging, instrumentation, the unoptimized build, WSL,
+filesystem placement, and shared machine load can influence these results;
+this experiment does not isolate a server bottleneck. These short, single-run
+local development measurements are not universal capacity limits, production
+benchmarks, or evidence of a percentage performance improvement.
 
 ## Roadmap
 

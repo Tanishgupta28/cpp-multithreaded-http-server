@@ -1,0 +1,269 @@
+{
+  "environment": {
+    "kernel": "5.15.167.4-microsoft-standard-WSL2",
+    "cpu": "11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz",
+    "logical_cpus": 8,
+    "python": "3.12.14",
+    "memory_kib": "MemTotal:        8015896 kB"
+  },
+  "server_command": [
+    "./build/http_server",
+    "48525"
+  ],
+  "logging": "enabled, stdout/stderr redirected to temporary file",
+  "stability": {
+    "thread_count": 5,
+    "thread_ids_unchanged": true,
+    "idle_fd_count": 6,
+    "idle_fds_restored_after_each_run": true,
+    "shutdown_exit_code": 0,
+    "completed_clients": 4502,
+    "index_cache_misses": 1,
+    "index_cache_hits": 1801
+  },
+  "results": [
+    {
+      "workload": "cold_application_cache",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/index.html"
+      ],
+      "requests": 1,
+      "concurrency": 1,
+      "timeout_seconds": 3,
+      "successful": 1,
+      "failed": 0,
+      "elapsed_seconds": 0.007206971999998757,
+      "requests_per_second": 138.7545282540535,
+      "latency_ms": {
+        "average": 6.660965999998325,
+        "p50": 6.660965999998325,
+        "p95": 6.660965999998325
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "warm_application_cache",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/index.html"
+      ],
+      "requests": 1,
+      "concurrency": 1,
+      "timeout_seconds": 3,
+      "successful": 1,
+      "failed": 0,
+      "elapsed_seconds": 0.005987066999999513,
+      "requests_per_second": 167.0266927028011,
+      "latency_ms": {
+        "average": 5.1375890000002755,
+        "p50": 5.1375890000002755,
+        "p95": 5.1375890000002755
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "health",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/health"
+      ],
+      "requests": 500,
+      "concurrency": 1,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.08623003999999668,
+      "requests_per_second": 5798.443326710962,
+      "latency_ms": {
+        "average": 0.17088064199982966,
+        "p50": 0.15060899999497224,
+        "p95": 0.2356959999971764
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "cached_static",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/index.html"
+      ],
+      "requests": 500,
+      "concurrency": 1,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.10882966899999502,
+      "requests_per_second": 4594.335392125679,
+      "latency_ms": {
+        "average": 0.21583172999991973,
+        "p50": 0.18992799999750787,
+        "p95": 0.3058990000042172
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "mixed",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/",
+        "/health",
+        "/index.html",
+        "/style.css",
+        "/hello.txt"
+      ],
+      "requests": 500,
+      "concurrency": 1,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.10216490299999492,
+      "requests_per_second": 4894.04859514255,
+      "latency_ms": {
+        "average": 0.20263149999993857,
+        "p50": 0.17281999999596565,
+        "p95": 0.24807899999501615
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "health",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/health"
+      ],
+      "requests": 500,
+      "concurrency": 4,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.22885483900000025,
+      "requests_per_second": 2184.791032537439,
+      "latency_ms": {
+        "average": 1.8096970559998624,
+        "p50": 1.7730120000010174,
+        "p95": 2.5885039999948845
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "cached_static",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/index.html"
+      ],
+      "requests": 500,
+      "concurrency": 4,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.24265694199999643,
+      "requests_per_second": 2060.522134165885,
+      "latency_ms": {
+        "average": 1.9139309499999084,
+        "p50": 1.8467599999993922,
+        "p95": 2.63440700000217
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "mixed",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/",
+        "/health",
+        "/index.html",
+        "/style.css",
+        "/hello.txt"
+      ],
+      "requests": 500,
+      "concurrency": 4,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.2562700410000005,
+      "requests_per_second": 1951.0669216305273,
+      "latency_ms": {
+        "average": 2.0277567499999947,
+        "p50": 1.9601719999968736,
+        "p95": 3.0436769999937496
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "health",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/health"
+      ],
+      "requests": 500,
+      "concurrency": 12,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.2875780360000064,
+      "requests_per_second": 1738.658511458743,
+      "latency_ms": {
+        "average": 6.683999031999946,
+        "p50": 6.49008199999912,
+        "p95": 9.868582999999376
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "cached_static",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/index.html"
+      ],
+      "requests": 500,
+      "concurrency": 12,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.29128242799999526,
+      "requests_per_second": 1716.547075747419,
+      "latency_ms": {
+        "average": 6.7827220359999245,
+        "p50": 6.616762999996695,
+        "p95": 9.80196900000152
+      },
+      "error_samples": []
+    },
+    {
+      "workload": "mixed",
+      "host": "127.0.0.1",
+      "port": 48525,
+      "paths": [
+        "/",
+        "/health",
+        "/index.html",
+        "/style.css",
+        "/hello.txt"
+      ],
+      "requests": 500,
+      "concurrency": 12,
+      "timeout_seconds": 3,
+      "successful": 500,
+      "failed": 0,
+      "elapsed_seconds": 0.30018096099999525,
+      "requests_per_second": 1665.6619338359967,
+      "latency_ms": {
+        "average": 7.042189713999904,
+        "p50": 6.768919000002427,
+        "p95": 10.752613999997607
+      },
+      "error_samples": []
+    }
+  ]
+}
