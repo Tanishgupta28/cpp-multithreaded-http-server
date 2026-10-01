@@ -6,7 +6,6 @@
 #include "logger.h"
 #include "shutdown_signal.h"
 #include <poll.h>
-#include <fcntl.h>
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -14,6 +13,7 @@
 
 #include <array>
 #include <cerrno>
+#include <exception>
 #include <string>
 #include <thread>
 

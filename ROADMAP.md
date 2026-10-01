@@ -1,7 +1,7 @@
 # Development roadmap
 
-Current stage: **Stage 13 complete. Stopped; awaiting authorization for Stage 14.**
-Complete one stage per authorized run, then stop for explicit instruction.
+Current stage: **Stage 14 complete. Final project scope complete; stopped.**
+All 14 authorized stages are complete. No further implementation stage is planned.
 
 | Stage | Scope | Status |
 | --- | --- | --- |
@@ -18,7 +18,7 @@ Complete one stage per authorized run, then stop for explicit instruction.
 | 11 | LRU cache using unordered_map and a doubly linked list, average O(1) lookup/update | Complete |
 | 12 | Graceful shutdown, logging, improved error handling | Complete |
 | 13 | Testing and basic load/performance testing | Complete |
-| 14 | Final cleanup, documentation, architecture explanation, GitHub polishing | Upcoming |
+| 14 | Final cleanup, documentation, architecture explanation, GitHub polishing | Complete |
 
 Stage 7 introduces workers and fixed-size execution; Stage 8 introduces the reusable synchronized queue. Keep this separation explicit when designing those stages.
 
@@ -390,4 +390,47 @@ If synchronization fails, record it here and preserve the local history.
 - Limits: short closed-loop local runs, client and server share CPU resources;
   Python/GIL, logging, instrumentation, WSL/filesystem, and default build flags
   influence measurements. Periodic thread sampling is not continuous monitoring.
-  No universal performance or speedup claims; no Stage 14 work started.
+  No universal performance or speedup claims; no Stage 14 work started in that run.
+
+## Stage 14 final validation - 2026-10-01
+
+- Final scope: documentation and conservative cleanup only. Removed an unused
+  fcntl include, made exception/string dependencies explicit, and clarified the
+  binary-safe Content-Length comment. No server features, behavior, class
+  responsibilities, thread counts, locking, cache policy, or tests were changed.
+- Rewrote README around the completed project: architecture diagram, request
+  lifecycle, build/run, HTTP behavior, concurrency, cache/security/shutdown,
+  seven test suites, original Stage 13 measurement table, and known limitations.
+  Added docs/architecture.md for components, ownership, separate locks, resource
+  cleanup, design tradeoffs, and an interview-ready explanation.
+- Reviewed source for unused/dead code, duplication, names, comments, formatting,
+  debug output, and unnecessary complexity. No redesign was warranted. Reviewed
+  repository organization and ignore rules; build output remains ignored, and
+  benchmarks/stage13.json remains the intentional, unchanged measured artifact.
+- Same Alpine Linux 3.22/WSL2, GCC 14.2.0, CMake 3.31.7, Python 3.12.14 toolchain.
+  Removed only the verified generated build directory, then ran
+  `cmake -S . -B build`, `cmake --build build`, and
+  `ctest --test-dir build --output-on-failure`: warning-free build, 7/7 passed
+  (4.96 seconds total CTest time).
+- Small final load: `python3 tests/benchmark.py ./build/http_server --requests 50
+  > build/final-load.json`. Nine workloads at 1/4/12 clients plus cold/warm probes:
+  452/452 requests succeeded. Worker IDs stayed unchanged (main + four workers),
+  idle descriptors returned to six after every workload, all client-close records
+  were present, and SIGINT joined workers with exit 0. No crashes/deadlocks observed.
+  This is final stability validation, not a replacement for Stage 13 benchmarks.
+- Direct netcat checks against `./build/http_server 8080`: / returned 200/28 body
+  bytes; /health 200/3; /hello.txt 200/26 twice; /missing 404/10; malformed
+  `GET / WRONG` 400/12; /../README.md 404/10. Checked exact bodies and lengths,
+  static cache miss/hit logs, and unchanged four-worker IDs. A terminal PTY
+  Ctrl+C generated SIGINT: four stop records, join completion, and exit 0.
+- Assumptions/limitations preserved: loopback Linux target, operator-controlled
+  public root, four blocking workers, unbounded queue, limited request-line HTTP,
+  whole-file memory use, no decoding/TLS/keep-alive/body handling, no cache
+  invalidation or byte cap, possible duplicate miss reads, no drain deadline,
+  and default SIGTERM behavior. Rare failure paths remain reviewed rather than
+  systematically fault-injected. No universal performance claims.
+- GitHub: existing public repository and main branch verified; authentication
+  available, and local/remote main matched before this stage. Delivery procedure:
+  commit this stage, push main normally, verify the remote hash, and report the
+  final synchronization status. Record any synchronization failure here.
+- Final stage complete. Stop; do not begin additional implementation.

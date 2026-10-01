@@ -9,7 +9,7 @@ std::string HttpResponse::serialize() const {
     response += status_;
     response += "\r\nContent-Type: " + content_type_;
     response += "\r\nContent-Length: ";
-    // Content-Length counts body bytes, including its final newline.
+    // Count all body bytes, including embedded NULs in binary files.
     response += std::to_string(body_.size());
     response += "\r\nConnection: close\r\n\r\n";
     response += body_;

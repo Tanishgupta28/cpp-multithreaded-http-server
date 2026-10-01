@@ -1,6 +1,7 @@
 #include "logger.h"
 #include <cstdio>
 #include <mutex>
+#include <string>
 #include <system_error>
 
 namespace {

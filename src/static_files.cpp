@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <exception>
 #include <string>
 
 namespace {

@@ -2,6 +2,7 @@
 #include "logger.h"
 
 #include <charconv>
+#include <exception>
 #include <iostream>
 #include <string_view>
 
